@@ -1,0 +1,19 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "mRNv6NTAfGphwvF7YzNk8XOhX10=",
+			"path": "gopkg.in/sorcix/irc.v2",
+			"revision": "63b1858457fa9439c5f37124100605a0b0d98bd8",
+			"revisionTime": "2016-05-13T12:23:15Z"
+		},
+		{
+			"checksumSHA1": "745d6gaBv5Ni3YrPvslpM4BoU6A=",
+			"path": "gopkg.in/sorcix/irc.v2/internal",
+			"revision": "63b1858457fa9439c5f37124100605a0b0d98bd8",
+			"revisionTime": "2016-05-13T12:23:15Z"
+		}
+	],
+	"rootPath": "anonircd"
+}
