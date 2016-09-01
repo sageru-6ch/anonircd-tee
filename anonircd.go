@@ -23,6 +23,7 @@ type Channel struct {
 type Client struct {
 	identifier  string
 	nick        string
+	user        string
 
 	conn        net.Conn
 	pings       []string
@@ -62,7 +63,7 @@ func randomIdentifier() string {
 }
 
 func (c *Client) getPrefix() *irc.Prefix {
-	return &irc.Prefix{Name:c.nick, User:"", Host:"AnonIRC"}
+	return &irc.Prefix{Name:c.nick, User:c.user, Host:"AnonIRC"}
 }
 
 func (s *Server) getChannels(client string) map[string]*Channel {
@@ -153,6 +154,10 @@ func (s *Server) updateUserCount(channel string) {
 }
 
 func (s *Server) sendTopic(channel string, client string, changed bool) {
+	if !s.inChannel(channel, client) {
+		return // Not in channel  TODO: Send error instead
+	}
+
 	if s.channels[channel].topic != "" {
 		tprefix := anonymous
 		tcommand := irc.TOPIC
@@ -171,6 +176,10 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 }
 
 func (s *Server) handleTopic(channel string, client string, topic string) {
+	if !s.inChannel(channel, client) {
+		return // Not in channel TODO: Send error
+	}
+
 	if topic != "" {
 		s.channels[channel].Lock()
 		s.channels[channel].topic = topic
@@ -186,6 +195,10 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 }
 
 func (s *Server) msgChannel(channel string, client string, message string) {
+	if !s.inChannel(channel, client) {
+		return // Not in channel  TODO: Send error message
+	}
+
 	for sclient := range s.channels[channel].clients {
 		if s.clients[sclient].identifier != client {
 			msgout := irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}}
@@ -211,6 +224,8 @@ func (s *Server) handleRead(c *Client) {
 			c.writebuffer <- &irc.Message{&anonircd, irc.PONG, []string{msg.Params[0]}}
 		} else if (msg.Command == irc.NICK && c.nick == "*" && msg.Params[0] != "" && msg.Params[0] != "*") {
 			c.nick = msg.Params[0]
+		} else if (msg.Command == irc.USER && c.user == "" && msg.Params[0] != "") {
+			c.user = msg.Params[0]
 
 			c.writebuffer <- &irc.Message{&anonircd, irc.RPL_WELCOME, []string{"Welcome to AnonIRC."}}
 			motdsplit := strings.Split(motd, "\n")
@@ -255,7 +270,7 @@ func (s *Server) handleWrite(c *Client) {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	client := Client{randomIdentifier(), "*", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), new(sync.RWMutex)}
+	client := Client{randomIdentifier(), "*", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), new(sync.RWMutex)}
 	defer conn.Close()
 
 	s.Lock()
