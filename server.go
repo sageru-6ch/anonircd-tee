@@ -95,7 +95,7 @@ func (s *Server) joinChannel(channel string, client string) {
 	s.channels[channel].clients[client] = len(s.channels[channel].clients) + 1
 	s.channels[channel].Unlock()
 
-	s.clients[client].writebuffer <- &irc.Message{nil, irc.JOIN, []string{channel}}
+	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.JOIN, []string{channel}}
 
 	s.sendNames(channel, client)
 	s.updateUserCount(channel)
@@ -107,7 +107,7 @@ func (s *Server) partChannel(channel string, client string) {
 		return // Not in channel
 	}
 
-	msgout := irc.Message{nil, irc.PART, []string{channel}}
+	msgout := irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel}}
 	s.clients[client].writebuffer <- &msgout
 
 	s.channels[channel].Lock()
@@ -212,11 +212,11 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
-	if len(params) == 0 || params[0][0] != '#' {
+	if len(params) == 0 || len(params[0]) == 0 || params[0][0] != '#' {
 		return // TODO: Send error
 	}
 
-	if len(params) > 1 && params[1][0] == '+' {
+	if len(params) > 1 && len(params[1]) > 0 && params[1][0] == '+' {
 		s.channels[params[0]].Lock()
 		s.channels[params[0]].addModes(params[1][1:])
 		s.channels[params[0]].Unlock()
@@ -229,7 +229,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 	}
 }
 
-func (s *Server) msgChannel(channel string, client string, message string) {
+func (s *Server) handlePrivmsg(channel string, client string, message string) {
 	if !s.inChannel(channel, client) {
 		return // Not in channel  TODO: Send error message
 	}
@@ -254,22 +254,22 @@ func (s *Server) handleRead(c *Client) {
 		if (msg.Command != irc.PING && msg.Command != irc.PONG) {
 			fmt.Println(c.identifier, "<-", fmt.Sprintf("%s", msg))
 		}
-		if (msg.Command == irc.CAP && len(msg.Params) > 0 && msg.Params[0] == irc.CAP_LS) {
+		if (msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS) {
 			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}}
-		} else if (msg.Command == irc.CAP && len(msg.Params) > 0 && msg.Params[0] == irc.CAP_REQ) {
+		} else if (msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ) {
 			if strings.Contains(msg.Trailing(), "userhost-in-names") {
 				c.capHostInNames = true
 			}
 			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{irc.CAP_ACK, msg.Trailing()}}
-		} else if (msg.Command == irc.CAP && len(msg.Params) > 0 && msg.Params[0] == irc.CAP_LIST) {
+		} else if (msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LIST) {
 			caps := []string{}
 			if c.capHostInNames {
 				caps = append(caps, "userhost-in-names")
 			}
 			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], strings.Join(caps, " ")}}
 		} else if (msg.Command == irc.PING) {
-			c.writebuffer <- &irc.Message{&anonirc, irc.PONG, []string{msg.Params[0]}}
-		} else if (msg.Command == irc.NICK && c.nick == "*" && msg.Params[0] != "" && msg.Params[0] != "*") {
+			c.writebuffer <- &irc.Message{&anonirc, irc.PONG + " AnonIRC", []string{msg.Trailing()}}
+		} else if (msg.Command == irc.NICK && c.nick == "*" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] != "" && msg.Params[0] != "*") {
 			c.nick = strings.Trim(msg.Params[0], "\"")
 		} else if (msg.Command == irc.USER && c.user == "" && len(msg.Params) >= 3 && msg.Params[0] != "" && msg.Params[2] != "") {
 			c.user = strings.Trim(msg.Params[0], "\"")
@@ -294,34 +294,46 @@ func (s *Server) handleRead(c *Client) {
 			}
 
 			s.joinChannel("#lobby", c.identifier)
-		} else if (msg.Command == irc.JOIN && msg.Params[0][0] == '#') {
-			s.joinChannel(msg.Params[0], c.identifier)
-		} else if (msg.Command == irc.NAMES && msg.Params[0][0] == '#') {
-			s.sendNames(msg.Params[0], c.identifier)
-		} else if (msg.Command == irc.WHO && msg.Params[0][0] == '#') {
-			if s.inChannel(msg.Params[0], c.identifier) {
-				i := 0
-				for _, cl := range s.getClients(msg.Params[0]) {
-					var prfx *irc.Prefix
-					if cl.identifier == c.identifier {
-						prfx = c.getPrefix()
-					} else {
-						i++
-						prfx = s.getAnonymousPrefix(i)
-					}
-
-					c.writebuffer <- &irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{msg.Params[0], prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 Anonymous"}}
-				}
-				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{msg.Params[0], "End of /WHO list."}}
+		} else if (msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
+			for _, channel := range strings.Split(msg.Params[0], ",") {
+				s.joinChannel(channel, c.identifier)
 			}
-		} else if (msg.Command == irc.MODE && msg.Params[0][0] == '#') {
-			s.handleMode(c, msg.Params)
-		} else if (msg.Command == irc.TOPIC) {
+		} else if (msg.Command == irc.NAMES && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
+			for _, channel := range strings.Split(msg.Params[0], ",") {
+				s.sendNames(channel, c.identifier)
+			}
+		} else if (msg.Command == irc.WHO && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
+			for _, channel := range strings.Split(msg.Params[0], ",") {
+				if s.inChannel(channel, c.identifier) {
+					i := 0
+					for _, cl := range s.getClients(channel) {
+						var prfx *irc.Prefix
+						if cl.identifier == c.identifier {
+							prfx = c.getPrefix()
+						} else {
+							i++
+							prfx = s.getAnonymousPrefix(i)
+						}
+
+						c.writebuffer <- &irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 Anonymous"}}
+					}
+					c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}}
+				}
+			}
+		} else if (msg.Command == irc.MODE && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
+			if len(msg.Params) == 2 && msg.Params[1] == "b" {
+				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"}}
+			} else {
+				s.handleMode(c, msg.Params)
+			}
+		} else if (msg.Command == irc.TOPIC && len(msg.Params) > 0 && len(msg.Params[0]) > 0) {
 			s.handleTopic(msg.Params[0], c.identifier, msg.Trailing())
-		} else if (msg.Command == irc.PRIVMSG) {
-			s.msgChannel(msg.Params[0], c.identifier, msg.Trailing())
-		} else if (msg.Command == irc.PART && msg.Params[0][0] == '#') {
-			s.partChannel(msg.Params[0], c.identifier)
+		} else if (msg.Command == irc.PRIVMSG && len(msg.Params) > 0 && len(msg.Params[0]) > 0) {
+			s.handlePrivmsg(msg.Params[0], c.identifier, msg.Trailing())
+		} else if (msg.Command == irc.PART && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
+			for _, channel := range strings.Split(msg.Params[0], ",") {
+				s.partChannel(channel, c.identifier)
+			}
 		} else if (msg.Command == irc.QUIT) {
 			s.partAllChannels(c.identifier)
 		}
@@ -330,10 +342,6 @@ func (s *Server) handleRead(c *Client) {
 
 func (s *Server) handleWrite(c *Client) {
 	for msg := range c.writebuffer {
-		if msg.Prefix == nil && c.nick != "" {
-			msg.Prefix = c.getPrefix()
-		}
-
 		addnick := false
 		if _, err := strconv.Atoi(msg.Command); err == nil {
 			addnick = true
@@ -412,8 +420,8 @@ func (s *Server) pingClients() {
 	for {
 		for _, c := range s.clients {
 			ping := fmt.Sprintf("anonirc%d%d", int32(time.Now().Unix()), rand.Intn(1000))
-			c.pings = append(c.pings, ping)
-			c.writebuffer <- &irc.Message{&anonirc, irc.PING, []string{ping}}
+			//c.pings = append(c.pings, ping)
+			c.writebuffer <- &irc.Message{nil, irc.PING, []string{ping}}
 		}
 		time.Sleep(15 * time.Second)
 	}

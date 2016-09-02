@@ -1,8 +1,6 @@
 // AnonIRCd
 // https://github.com/tslocum/anonircd
-//
 // Written by Trevor 'tee' Slocum <tslocum@gmail.com>
-// Inspired by a Java implementation written by Daniel da Silva 'meltingwax'
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by

@@ -1,5 +1,8 @@
 AnonIRCd
 --------
+
+Connect to [z.1chan.us:6667](irc://z.1chan.us:6667) or [:6697 (SSL)](ircs://z.1chan.us:6697)
+
 ##### TODO:
 - configuration system
 - database (sqlite for portability?)
