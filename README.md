@@ -1,6 +1,6 @@
-how do i shot web
------------------
-TODO:
+AnonIRCd
+--------
+##### TODO:
 - configuration system
 - database (sqlite for portability?)
 - ssl
@@ -14,7 +14,8 @@ TODO:
   - each channel password can be supplied during connection as server password (e.g. #lobby/swordfish:#lounge/8ball) or via a command
 - private channels (+k implementation)
 - implement read locks...? are they necessary?
-- respond to /who and /names
 - /list support
 - move userlist updates to more efficient goroutine monitoring changes
 - whois anonymous<#> easter egg, could be pre-programmed witty phrases/quotes
+- op users (locally) when they are logged in to a founder/admin/mod password for client compatibility
+- send supported user and channel modes when new user connects
