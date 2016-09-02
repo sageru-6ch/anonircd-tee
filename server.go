@@ -11,9 +11,11 @@ import (
 
 	irc "gopkg.in/sorcix/irc.v2"
 	"math/rand"
+	"crypto/tls"
 )
 
 type Server struct {
+	config   *Config
 	created  int64
 	clients  map[string]*Client
 	channels map[string]*Channel
@@ -276,7 +278,7 @@ func (s *Server) handleRead(c *Client) {
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()}}
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd"}}
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())}}
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd ", umodes, cmodes, cmodesarg}, " "), []string{}}
+			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd", umodes, cmodes, cmodesarg}, " "), []string{}}
 
 			motdsplit := strings.Split(motd, "\n")
 			for i, motdmsg := range motdsplit {
@@ -351,8 +353,9 @@ func (s *Server) handleWrite(c *Client) {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	client := Client{randomIdentifier(), "*", "", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), false, new(sync.RWMutex)}
 	defer conn.Close()
+
+	client := Client{randomIdentifier(), "*", "", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), false, new(sync.RWMutex)}
 
 	s.Lock()
 	s.clients[client.identifier] = &client
@@ -361,30 +364,64 @@ func (s *Server) handleConnection(conn net.Conn) {
 	go s.handleWrite(&client)
 	s.handleRead(&client)
 }
-func (s *Server) pingClients() {
-	for _, c := range s.clients {
-		ping := fmt.Sprintf("anonirc%d%d", int32(time.Now().Unix()), rand.Intn(1000))
-		c.pings = append(c.pings, ping)
-		c.writebuffer <- &irc.Message{&anonirc, irc.PING, []string{ping}}
-	}
-	time.Sleep(15 * time.Second)
-}
 
-func (s *Server) listen() {
-	listener, err := net.Listen("tcp", ":6667")
+func (s *Server) listenPlain() {
+	listen, err := net.Listen("tcp", ":6667")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
-	defer listener.Close()
-
-	go s.pingClients()
+	defer listen.Close()
 
 	for {
-		conn, err := listener.Accept()
+		conn, err := listen.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
 		go s.handleConnection(conn)
 	}
+}
+
+func (s *Server) listenSSL() {
+	if s.config.SSLCert == "" {
+		return // SSL is disabled
+	}
+
+	cert, err := tls.LoadX509KeyPair(s.config.SSLCert, s.config.SSLKey)
+	if err != nil {
+		log.Fatalf("Failed to load SSL certificate: %v", err)
+	}
+
+	listen, err := tls.Listen("tcp", ":6697", &tls.Config{Certificates:[]tls.Certificate{cert}})
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+	defer listen.Close()
+
+	for {
+		conn, err := listen.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection:", err)
+			continue
+		}
+		go s.handleConnection(conn)
+	}
+}
+
+func (s *Server) pingClients() {
+	for {
+		for _, c := range s.clients {
+			ping := fmt.Sprintf("anonirc%d%d", int32(time.Now().Unix()), rand.Intn(1000))
+			c.pings = append(c.pings, ping)
+			c.writebuffer <- &irc.Message{&anonirc, irc.PING, []string{ping}}
+		}
+		time.Sleep(15 * time.Second)
+	}
+}
+
+func (s *Server) listen() {
+	go s.listenPlain()
+	go s.listenSSL()
+
+	s.pingClients()
 }

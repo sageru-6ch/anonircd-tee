@@ -1,3 +1,5 @@
 .idea
-bin
 anonircd
+anonircd.conf
+bin
+data

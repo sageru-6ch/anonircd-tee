@@ -25,7 +25,10 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	irc "gopkg.in/sorcix/irc.v2"
+	"log"
+	"os"
 )
 
 var anonymous = irc.Prefix{"Anonymous", "Anon", "IRC"}
@@ -43,6 +46,11 @@ const umodes = "a"
 const cmodes = "it"
 const cmodesarg = "kl"
 
+type Config struct {
+	SSLCert string
+	SSLKey  string
+}
+
 func randomIdentifier() string {
 	b := make([]byte, 10)
 	for i := range b {
@@ -54,6 +62,13 @@ func randomIdentifier() string {
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	server := Server{time.Now().Unix(), make(map[string]*Client), make(map[string]*Channel), new(sync.RWMutex)}
+	var config Config
+	if _, err := os.Stat("anonircd.conf"); err == nil {
+		if _, err := toml.DecodeFile("anonircd.conf", &config); err != nil {
+			log.Fatalf("Failed to read anonircd.conf: %v", err)
+		}
+	}
+
+	server := Server{&config, time.Now().Unix(), make(map[string]*Client), make(map[string]*Channel), new(sync.RWMutex)}
 	server.listen()
 }
