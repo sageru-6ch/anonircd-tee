@@ -19,3 +19,4 @@ AnonIRCd
 - whois anonymous<#> easter egg, could be pre-programmed witty phrases/quotes
 - op users (locally) when they are logged in to a founder/admin/mod password for client compatibility
 - send supported user and channel modes when new user connects
+- SSL-only channel mode
