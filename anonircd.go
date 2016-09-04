@@ -40,9 +40,6 @@ _|    _|  _|    _|  _|    _|  _|    _|    _|    _|    _|  _|
 _|    _|  _|    _|    _|_|    _|    _|  _|_|_|  _|    _|    _|_|_|
 `
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-const umodes = "a"
-const cmodes = "it"
-const cmodesarg = "kl"
 
 type Config struct {
 	SSLCert string

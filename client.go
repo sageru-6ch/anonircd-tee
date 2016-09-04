@@ -2,12 +2,13 @@ package main
 
 import (
 	"net"
-	"sync"
 
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
 type Client struct {
+	Entity
+
 	identifier     string
 	nick           string
 	user           string
@@ -21,8 +22,6 @@ type Client struct {
 	writer         *irc.Encoder
 
 	capHostInNames bool
-
-	*sync.RWMutex
 }
 
 func (c *Client) getPrefix() *irc.Prefix {

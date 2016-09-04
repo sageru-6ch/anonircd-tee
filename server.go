@@ -12,6 +12,7 @@ import (
 	irc "gopkg.in/sorcix/irc.v2"
 	"math/rand"
 	"crypto/tls"
+	"reflect"
 )
 
 type Server struct {
@@ -89,7 +90,7 @@ func (s *Server) joinChannel(channel string, client string) {
 	}
 
 	if !s.channelExists(channel) {
-		s.channels[channel] = &Channel{time.Now().Unix(), make(map[string]int), make(map[string]string), "", 0, new(sync.RWMutex)}
+		s.channels[channel] = &Channel{Entity{ENTITY_CHANNEL, time.Now().Unix(), make(map[string]string), new(sync.RWMutex)}, make(map[string]int), "", 0}
 	}
 	s.channels[channel].Lock()
 	s.channels[channel].clients[client] = len(s.channels[channel].clients) + 1
@@ -107,8 +108,7 @@ func (s *Server) partChannel(channel string, client string) {
 		return // Not in channel
 	}
 
-	msgout := irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel}}
-	s.clients[client].writebuffer <- &msgout
+	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel}}
 
 	s.channels[channel].Lock()
 	delete(s.channels[channel].clients, client)
@@ -125,24 +125,27 @@ func (s *Server) partAllChannels(client string) {
 
 func (s *Server) updateUserCount(channel string) {
 	for cclient, ccount := range s.channels[channel].clients {
-		if ccount < len(s.channels[channel].clients) {
-			for i := ccount; i < len(s.channels[channel].clients); i++ {
+		chancount := 1
+		if !s.clients[cclient].hasMode("h") {
+			chancount = len(s.channels[channel].clients)
+		}
+
+		if ccount < chancount {
+			for i := ccount; i < chancount; i++ {
 				prefix := anonymous
 				if i > 1 {
 					prefix.Name += fmt.Sprintf("%d", i)
 				}
-				msgout := irc.Message{s.getAnonymousPrefix(i), irc.JOIN, []string{channel}}
-				s.clients[cclient].writebuffer <- &msgout
+				s.clients[cclient].writebuffer <- &irc.Message{s.getAnonymousPrefix(i), irc.JOIN, []string{channel}}
 			}
 
-			s.channels[channel].clients[cclient] = len(s.channels[channel].clients)
-		} else if ccount > len(s.channels[channel].clients) {
-			for i := ccount; i > len(s.channels[channel].clients); i-- {
-				msgout := irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}}
-				s.clients[cclient].writebuffer <- &msgout
+			s.channels[channel].clients[cclient] = chancount
+		} else if ccount > chancount {
+			for i := ccount; i > chancount; i-- {
+				s.clients[cclient].writebuffer <- &irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}}
 			}
 
-			s.channels[channel].clients[cclient] = len(s.channels[channel].clients)
+			s.channels[channel].clients[cclient] = chancount
 		}
 	}
 }
@@ -182,12 +185,10 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 			tprefix = anonirc
 			tcommand = irc.RPL_TOPIC
 		}
-		msgout := irc.Message{&tprefix, tcommand, []string{channel, s.channels[channel].topic}}
-		s.clients[client].writebuffer <- &msgout
+		s.clients[client].writebuffer <- &irc.Message{&tprefix, tcommand, []string{channel, s.channels[channel].topic}}
 
 		if !changed {
-			msgout2 := irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, s.clients[client].nick, channel, "Anonymous", fmt.Sprintf("%d", s.channels[channel].topictime)}, " "), nil}
-			s.clients[client].writebuffer <- &msgout2
+			s.clients[client].writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, s.clients[client].nick, channel, "Anonymous", fmt.Sprintf("%d", s.channels[channel].topictime)}, " "), nil}
 		}
 	}
 }
@@ -212,20 +213,73 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
-	if len(params) == 0 || len(params[0]) == 0 || params[0][0] != '#' {
+	if len(params) == 0 || len(params[0]) == 0 {
 		return // TODO: Send error
 	}
 
-	if len(params) > 1 && len(params[1]) > 0 && params[1][0] == '+' {
-		s.channels[params[0]].Lock()
-		s.channels[params[0]].addModes(params[1][1:])
-		s.channels[params[0]].Unlock()
-	}
+	if params[0][0] == '#' {
+		if !s.channelExists(params[0]) {
+			return
+		}
 
-	c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], s.channels[params[0]].printModes(nil)}, " "), []string{}}
-	if len(params) == 1 {
-		// Send channel creation time
-		c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(s.channels[params[0]].created))}, " "), []string{}}
+		channel := s.channels[params[0]]
+		if len(params) == 1 {
+			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], channel.printModes(nil)}, " "), []string{}}
+
+			// Send channel creation time
+			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(channel.created))}, " "), []string{}}
+		} else if len(params) > 1 && len(params[1]) > 0  && (params[1][0] == '+' || params[1][0] == '-') {
+			lastmodes := make(map[string]string)
+			for mode, modevalue := range channel.modes {
+				lastmodes[mode] = modevalue
+			}
+
+			channel.Lock()
+			if params[1][0] == '+' {
+				channel.addModes(params[1][1:])
+			} else {
+				channel.removeModes(params[1][1:])
+			}
+			channel.Unlock()
+
+			if !reflect.DeepEqual(channel.modes, lastmodes) {
+				for sclient := range channel.clients {
+					s.clients[sclient].writebuffer <- &irc.Message{&anonymous, irc.MODE, []string{params[0], channel.printModes(lastmodes)}}
+				}
+			}
+		}
+	} else {
+		if len(params) == 1 {
+			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(nil)}, " "), []string{}}
+			return
+		}
+
+		lastmodes := make(map[string]string)
+		for mode, modevalue := range c.modes {
+			lastmodes[mode] = modevalue
+		}
+
+		forcedisplay := true
+		if len(params) > 1 && len(params[1]) > 0  && (params[1][0] == '+' || params[1][0] == '-') {
+			forcedisplay = false
+
+			c.Lock()
+			if params[1][0] == '+' {
+				c.addModes(params[1][1:])
+			} else {
+				c.removeModes(params[1][1:])
+			}
+			c.Unlock()
+		}
+
+		if forcedisplay || !reflect.DeepEqual(c.modes, lastmodes) {
+			printmodes := lastmodes
+			if forcedisplay {
+				printmodes = nil
+			}
+
+			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(printmodes)}}
+		}
 	}
 }
 
@@ -236,8 +290,7 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 
 	for sclient := range s.channels[channel].clients {
 		if s.clients[sclient].identifier != client {
-			msgout := irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}}
-			s.clients[sclient].writebuffer <- &msgout
+			s.clients[sclient].writebuffer <- &irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}}
 		}
 	}
 }
@@ -278,7 +331,7 @@ func (s *Server) handleRead(c *Client) {
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()}}
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd"}}
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())}}
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd", umodes, cmodes, cmodesarg}, " "), []string{}}
+			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{}}
 
 			motdsplit := strings.Split(motd, "\n")
 			for i, motdmsg := range motdsplit {
@@ -293,7 +346,7 @@ func (s *Server) handleRead(c *Client) {
 				c.writebuffer <- &irc.Message{&anonirc, motdcode, []string{"  " + motdmsg}}
 			}
 
-			s.joinChannel("#lobby", c.identifier)
+			s.joinChannel("#", c.identifier)
 		} else if (msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				s.joinChannel(channel, c.identifier)
@@ -320,8 +373,8 @@ func (s *Server) handleRead(c *Client) {
 					c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}}
 				}
 			}
-		} else if (msg.Command == irc.MODE && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
-			if len(msg.Params) == 2 && msg.Params[1] == "b" {
+		} else if (msg.Command == irc.MODE && len(msg.Params) > 0 && len(msg.Params[0]) > 0) {
+			if len(msg.Params) == 2 && msg.Params[0][0] == '#' && msg.Params[1] == "b" {
 				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"}}
 			} else {
 				s.handleMode(c, msg.Params)
@@ -363,7 +416,15 @@ func (s *Server) handleWrite(c *Client) {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	client := Client{randomIdentifier(), "*", "", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), false, new(sync.RWMutex)}
+	var identifier string
+	for {
+		identifier = randomIdentifier()
+		if _, ok := s.clients[identifier]; !ok {
+			break
+		}
+	}
+
+	client := Client{Entity{ENTITY_CLIENT, time.Now().Unix(), make(map[string]string), new(sync.RWMutex)}, identifier, "*", "", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), false}
 
 	s.Lock()
 	s.clients[client.identifier] = &client
