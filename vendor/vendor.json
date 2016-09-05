@@ -3,6 +3,12 @@
 	"ignore": "test",
 	"package": [
 		{
+			"checksumSHA1": "hqDDDpue/5363luidNMBS8z8eJU=",
+			"path": "github.com/BurntSushi/toml",
+			"revision": "99064174e013895bbd9b025c31100bd1d9b590ca",
+			"revisionTime": "2016-07-17T15:07:09Z"
+		},
+		{
 			"checksumSHA1": "mRNv6NTAfGphwvF7YzNk8XOhX10=",
 			"path": "gopkg.in/sorcix/irc.v2",
 			"revision": "63b1858457fa9439c5f37124100605a0b0d98bd8",
@@ -15,5 +21,5 @@
 			"revisionTime": "2016-05-13T12:23:15Z"
 		}
 	],
-	"rootPath": "anonircd"
+	"rootPath": "github.com/tslocum/AnonIRCd"
 }
