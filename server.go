@@ -380,6 +380,18 @@ func (s *Server) handleRead(c *Client) {
 			}
 
 			s.joinChannel("#", c.identifier)
+		} else if (msg.Command == irc.LIST) {
+			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTSTART, []string{"Channel", "Users Name"}}
+			for channelname, channel := range s.channels {
+				var ccount int
+				if c.hasMode("c") || channel.hasMode("c") {
+					ccount = 2
+				} else {
+					ccount = len(channel.clients)
+				}
+				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LIST, []string{channelname, strconv.Itoa(ccount), "[" + channel.printModes(nil) + "] " + channel.topic}}
+			}
+			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTEND, []string{"End of /LIST"}}
 		} else if (msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				s.joinChannel(channel, c.identifier)
