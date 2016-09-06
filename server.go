@@ -91,9 +91,18 @@ func (s *Server) joinChannel(channel string, client string) {
 
 	if !s.channelExists(channel) {
 		s.channels[channel] = &Channel{Entity{ENTITY_CHANNEL, time.Now().Unix(), make(map[string]string), new(sync.RWMutex)}, make(map[string]int), "", 0}
+	} else if s.channels[channel].hasMode("z") && !s.clients[client].ssl {
+		s.clients[client].sendNotice("Unable to join " + channel + ": SSL connections only (channel mode +z)")
+		return
 	}
 	s.channels[channel].Lock()
-	s.channels[channel].clients[client] = len(s.channels[channel].clients) + 1
+	var ccount int
+	if s.clients[client].hasMode("c") || s.channels[channel].hasMode("c") {
+		ccount = 2
+	} else {
+		ccount = len(s.channels[channel].clients) + 1
+	}
+	s.channels[channel].clients[client] = ccount
 	s.channels[channel].Unlock()
 
 	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.JOIN, []string{channel}}
@@ -103,12 +112,12 @@ func (s *Server) joinChannel(channel string, client string) {
 	s.sendTopic(channel, client, false)
 }
 
-func (s *Server) partChannel(channel string, client string) {
+func (s *Server) partChannel(channel string, client string, reason string) {
 	if !s.inChannel(channel, client) {
-		return // Not in channel
+		return
 	}
 
-	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel}}
+	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel, reason}}
 
 	s.channels[channel].Lock()
 	delete(s.channels[channel].clients, client)
@@ -119,33 +128,45 @@ func (s *Server) partChannel(channel string, client string) {
 
 func (s *Server) partAllChannels(client string) {
 	for channelname := range s.getChannels(client) {
-		s.partChannel(channelname, client)
+		s.partChannel(channelname, client, "")
+	}
+}
+
+func (s *Server) enforceModes(channel string) {
+	if s.channels[channel].hasMode("z") {
+		for client := range s.channels[channel].clients {
+			if !s.clients[client].ssl {
+				s.partChannel(channel, client, "Only SSL connections are allowed in this channel")
+			}
+		}
 	}
 }
 
 func (s *Server) updateUserCount(channel string) {
 	for cclient, ccount := range s.channels[channel].clients {
-		chancount := 1
-		if !s.clients[cclient].hasMode("h") {
+		var chancount int
+		if s.clients[cclient].hasMode("c") || s.channels[channel].hasMode("c") {
+			chancount = 2 // Hide user count
+		} else {
 			chancount = len(s.channels[channel].clients)
 		}
 
 		if ccount < chancount {
+			s.channels[channel].Lock()
 			for i := ccount; i < chancount; i++ {
-				prefix := anonymous
-				if i > 1 {
-					prefix.Name += fmt.Sprintf("%d", i)
-				}
 				s.clients[cclient].writebuffer <- &irc.Message{s.getAnonymousPrefix(i), irc.JOIN, []string{channel}}
 			}
 
 			s.channels[channel].clients[cclient] = chancount
+			s.channels[channel].Unlock()
 		} else if ccount > chancount {
+			s.channels[channel].Lock()
 			for i := ccount; i > chancount; i-- {
 				s.clients[cclient].writebuffer <- &irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}}
 			}
 
 			s.channels[channel].clients[cclient] = chancount
+			s.channels[channel].Unlock()
 		}
 	}
 }
@@ -160,7 +181,14 @@ func (s *Server) sendNames(channel string, clientname string) {
 			names = append(names, c.nick)
 		}
 
-		for i := 1; i < len(s.channels[channel].clients); i++ {
+		var ccount int
+		if s.clients[clientname].hasMode("c") || s.channels[channel].hasMode("c") {
+			ccount = 2
+		} else {
+			ccount = len(s.channels[channel].clients)
+		}
+
+		for i := 1; i < ccount; i++ {
 			if c.capHostInNames {
 				names = append(names, s.getAnonymousPrefix(i).String())
 			} else {
@@ -175,7 +203,7 @@ func (s *Server) sendNames(channel string, clientname string) {
 
 func (s *Server) sendTopic(channel string, client string, changed bool) {
 	if !s.inChannel(channel, client) {
-		return // Not in channel  TODO: Send error instead
+		return
 	}
 
 	if s.channels[channel].topic != "" {
@@ -195,7 +223,8 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 
 func (s *Server) handleTopic(channel string, client string, topic string) {
 	if !s.inChannel(channel, client) {
-		return // Not in channel TODO: Send error
+		s.clients[client].sendNotice("Invalid use of TOPIC")
+		return
 	}
 
 	if topic != "" {
@@ -214,7 +243,8 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 
 func (s *Server) handleMode(c *Client, params []string) {
 	if len(params) == 0 || len(params[0]) == 0 {
-		return // TODO: Send error
+		c.sendNotice("Invalid use of MODE")
+		return
 	}
 
 	if params[0][0] == '#' {
@@ -240,12 +270,15 @@ func (s *Server) handleMode(c *Client, params []string) {
 			} else {
 				channel.removeModes(params[1][1:])
 			}
+			s.enforceModes(params[0])
 			channel.Unlock()
 
 			if !reflect.DeepEqual(channel.modes, lastmodes) {
 				for sclient := range channel.clients {
 					s.clients[sclient].writebuffer <- &irc.Message{&anonymous, irc.MODE, []string{params[0], channel.printModes(lastmodes)}}
 				}
+
+				s.updateUserCount(params[0])
 			}
 		}
 	} else {
@@ -285,7 +318,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 
 func (s *Server) handlePrivmsg(channel string, client string, message string) {
 	if !s.inChannel(channel, client) {
-		return // Not in channel  TODO: Send error message
+		return // Not in channel
 	}
 
 	for sclient := range s.channels[channel].clients {
@@ -358,13 +391,18 @@ func (s *Server) handleRead(c *Client) {
 		} else if (msg.Command == irc.WHO && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				if s.inChannel(channel, c.identifier) {
-					i := 0
-					for _, cl := range s.getClients(channel) {
+					var ccount int
+					if c.hasMode("c") || s.channels[channel].hasMode("c") {
+						ccount = 2
+					} else {
+						ccount = len(s.channels[channel].clients)
+					}
+
+					for i := 0; i < ccount; i++ {
 						var prfx *irc.Prefix
-						if cl.identifier == c.identifier {
+						if i == 0 {
 							prfx = c.getPrefix()
 						} else {
-							i++
 							prfx = s.getAnonymousPrefix(i)
 						}
 
@@ -373,7 +411,7 @@ func (s *Server) handleRead(c *Client) {
 					c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}}
 				}
 			}
-		} else if (msg.Command == irc.MODE && len(msg.Params) > 0 && len(msg.Params[0]) > 0) {
+		} else if (msg.Command == irc.MODE) {
 			if len(msg.Params) == 2 && msg.Params[0][0] == '#' && msg.Params[1] == "b" {
 				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"}}
 			} else {
@@ -385,7 +423,7 @@ func (s *Server) handleRead(c *Client) {
 			s.handlePrivmsg(msg.Params[0], c.identifier, msg.Trailing())
 		} else if (msg.Command == irc.PART && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
-				s.partChannel(channel, c.identifier)
+				s.partChannel(channel, c.identifier, "")
 			}
 		} else if (msg.Command == irc.QUIT) {
 			s.partAllChannels(c.identifier)
@@ -413,7 +451,7 @@ func (s *Server) handleWrite(c *Client) {
 	}
 }
 
-func (s *Server) handleConnection(conn net.Conn) {
+func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	defer conn.Close()
 
 	var identifier string
@@ -424,7 +462,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}
 
-	client := Client{Entity{ENTITY_CLIENT, time.Now().Unix(), make(map[string]string), new(sync.RWMutex)}, identifier, "*", "", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), false}
+	client := Client{Entity{ENTITY_CLIENT, time.Now().Unix(), make(map[string]string), new(sync.RWMutex)}, identifier, ssl, "*", "", "", conn, []string{}, make(chan *irc.Message), irc.NewDecoder(conn), irc.NewEncoder(conn), false}
 
 	s.Lock()
 	s.clients[client.identifier] = &client
@@ -447,7 +485,7 @@ func (s *Server) listenPlain() {
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
-		go s.handleConnection(conn)
+		go s.handleConnection(conn, false)
 	}
 }
 
@@ -473,7 +511,7 @@ func (s *Server) listenSSL() {
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
-		go s.handleConnection(conn)
+		go s.handleConnection(conn, true)
 	}
 }
 

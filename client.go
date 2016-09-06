@@ -10,6 +10,7 @@ type Client struct {
 	Entity
 
 	identifier     string
+	ssl            bool
 	nick           string
 	user           string
 	host           string
@@ -26,4 +27,8 @@ type Client struct {
 
 func (c *Client) getPrefix() *irc.Prefix {
 	return &irc.Prefix{Name:c.nick, User:c.user, Host:c.host}
+}
+
+func (c *Client) sendNotice(notice string) {
+	c.writebuffer <- &irc.Message{&anonirc, irc.NOTICE, []string{c.nick, "*** " + notice}}
 }

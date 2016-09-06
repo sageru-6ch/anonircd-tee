@@ -9,8 +9,8 @@ import (
 const ENTITY_CLIENT = 0
 const ENTITY_CHANNEL = 1
 
-const CLIENT_MODES = "qs"
-const CHANNEL_MODES = "it"
+const CLIENT_MODES = "c"
+const CHANNEL_MODES = "cistz"
 const CHANNEL_MODES_ARG = "kl"
 
 type Entity struct {
