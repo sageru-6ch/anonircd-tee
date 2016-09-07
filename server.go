@@ -381,15 +381,22 @@ func (s *Server) handleRead(c *Client) {
 
 			s.joinChannel("#", c.identifier)
 		} else if (msg.Command == irc.LIST) {
-			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTSTART, []string{"Channel", "Users Name"}}
+			var ccount int
+			chans := make(map[string]int)
 			for channelname, channel := range s.channels {
-				var ccount int
-				if c.hasMode("c") || channel.hasMode("c") {
-					ccount = 2
-				} else {
-					ccount = len(channel.clients)
+				if !channel.hasMode("p") && !channel.hasMode("s") {
+					if c.hasMode("c") || channel.hasMode("c") {
+						ccount = 2
+					} else {
+						ccount = len(channel.clients)
+					}
+					chans[channelname] = ccount
 				}
-				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LIST, []string{channelname, strconv.Itoa(ccount), "[" + channel.printModes(nil) + "] " + channel.topic}}
+			}
+
+			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTSTART, []string{"Channel", "Users Name"}}
+			for _, pl := range sortMapByValues(chans) {
+				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LIST, []string{pl.Key, strconv.Itoa(pl.Value), "[" + s.channels[pl.Key].printModes(nil) + "] " + s.channels[pl.Key].topic}}
 			}
 			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTEND, []string{"End of /LIST"}}
 		} else if (msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#') {
