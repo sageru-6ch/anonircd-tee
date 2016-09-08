@@ -9,14 +9,12 @@ import (
 type Client struct {
 	Entity
 
-	identifier     string
 	ssl            bool
 	nick           string
 	user           string
 	host           string
 
 	conn           net.Conn
-	pings          []string
 	writebuffer    chan *irc.Message
 
 	reader         *irc.Decoder

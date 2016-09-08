@@ -15,6 +15,7 @@ const CHANNEL_MODES_ARG = "kl"
 
 type Entity struct {
 	entitytype int
+	identifier string
 	created    int64
 	modes      map[string]string
 
@@ -60,38 +61,51 @@ func (e *Entity) removeModes(modes string) {
 	}
 }
 
-func (e *Entity) printModes(lastmodes map[string]string) string {
+func (e *Entity) diffModes(lastmodes map[string]string) (map[string]string, map[string]string) {
+	addedmodes := make(map[string]string)
+	if lastmodes != nil {
+		for mode := range e.modes {
+			if _, ok := lastmodes[mode]; !ok {
+				addedmodes[mode] = lastmodes[mode]
+			}
+		}
+	}
+
+	removedmodes := make(map[string]string)
+	for mode := range lastmodes {
+		if _, ok := e.modes[mode]; !ok {
+			removedmodes[mode] = e.modes[mode]
+		}
+	}
+
+	return addedmodes, removedmodes
+}
+
+func (e *Entity) printModes(addedmodes map[string]string, removedmodes map[string]string) string {
+	if removedmodes == nil {
+		removedmodes = make(map[string]string)
+	}
+
 	m := ""
 
 	// Added modes
 	sentsign := false
-	for mode := range e.modes {
-		sendmode := true
-		if lastmodes != nil {
-			if _, ok := lastmodes[mode]; ok {
-				sendmode = false
-			}
+	for mode := range addedmodes {
+		if !sentsign {
+			m += "+"
+			sentsign = true
 		}
-
-		if sendmode {
-			if !sentsign {
-				m += "+"
-				sentsign = true
-			}
-			m += mode
-		}
+		m += mode
 	}
 
 	// Removed modes
 	sentsign = false
-	for mode := range lastmodes {
-		if _, ok := e.modes[mode]; !ok {
-			if !sentsign {
-				m += "-"
-				sentsign = true
-			}
-			m += mode
+	for mode := range removedmodes {
+		if !sentsign {
+			m += "-"
+			sentsign = true
 		}
+		m += mode
 	}
 
 	if m == "" {
