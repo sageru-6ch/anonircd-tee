@@ -1,6 +1,7 @@
 .idea
 *.iml
 *.db
+*.sh
 AnonIRCd
 anonircd
 anonircd.conf

@@ -10,16 +10,26 @@ import (
 	"time"
 
 	"crypto/tls"
+	"github.com/BurntSushi/toml"
 	irc "gopkg.in/sorcix/irc.v2"
 	"math/rand"
+	"os"
 	"reflect"
 )
+
+type Config struct {
+	SSLCert string
+	SSLKey  string
+}
 
 type Server struct {
 	config   *Config
 	created  int64
 	clients  map[string]*Client
 	channels map[string]*Channel
+
+	restartplain chan bool
+	restartssl   chan bool
 
 	*sync.RWMutex
 }
@@ -358,12 +368,12 @@ func (s *Server) handleRead(c *Client) {
 		c.conn.SetDeadline(time.Now().Add(300 * time.Second))
 		msg, err := s.clients[c.identifier].reader.Decode()
 		if err != nil {
-			fmt.Println("Unable to read from client:", err)
+			log.Println("Unable to read from client:", err)
 			s.partAllChannels(c.identifier)
 			return
 		}
 		if msg.Command != irc.PING && msg.Command != irc.PONG {
-			fmt.Println(c.identifier, "<-", fmt.Sprintf("%s", msg))
+			log.Println(c.identifier, "<-", fmt.Sprintf("%s", msg))
 		}
 		if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
 			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}}
@@ -480,7 +490,7 @@ func (s *Server) handleWrite(c *Client) {
 		}
 
 		if msg.Command != irc.PING && msg.Command != irc.PONG {
-			fmt.Println(c.identifier, "->", msg)
+			log.Println(c.identifier, "->", msg)
 		}
 		c.writer.Encode(msg)
 	}
@@ -508,45 +518,70 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 }
 
 func (s *Server) listenPlain() {
-	listen, err := net.Listen("tcp", ":6667")
-	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
-	}
-	defer listen.Close()
-
 	for {
-		conn, err := listen.Accept()
+		listen, err := net.Listen("tcp", ":6667")
 		if err != nil {
-			fmt.Println("Error accepting connection:", err)
+			log.Println("Failed to listen: %v", err)
+			time.Sleep(1 * time.Minute)
 			continue
 		}
-		go s.handleConnection(conn, false)
+		log.Println("Listening on 6667")
+
+	accept:
+		for {
+			select {
+			case _ = <-s.restartplain:
+				break accept
+			default:
+				conn, err := listen.Accept()
+				if err != nil {
+					log.Println("Error accepting connection:", err)
+					continue
+				}
+				go s.handleConnection(conn, true)
+			}
+		}
+		listen.Close()
 	}
 }
 
 func (s *Server) listenSSL() {
-	if s.config.SSLCert == "" {
-		return // SSL is disabled
-	}
-
-	cert, err := tls.LoadX509KeyPair(s.config.SSLCert, s.config.SSLKey)
-	if err != nil {
-		log.Fatalf("Failed to load SSL certificate: %v", err)
-	}
-
-	listen, err := tls.Listen("tcp", ":6697", &tls.Config{Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
-	}
-	defer listen.Close()
-
 	for {
-		conn, err := listen.Accept()
+		if s.config.SSLCert == "" {
+			time.Sleep(1 * time.Minute)
+			return // SSL is disabled
+		}
+
+		cert, err := tls.LoadX509KeyPair(s.config.SSLCert, s.config.SSLKey)
 		if err != nil {
-			fmt.Println("Error accepting connection:", err)
+			log.Println("Failed to load SSL certificate: %v", err)
+			time.Sleep(1 * time.Minute)
 			continue
 		}
-		go s.handleConnection(conn, true)
+
+		listen, err := tls.Listen("tcp", ":6697", &tls.Config{Certificates: []tls.Certificate{cert}})
+		if err != nil {
+			log.Println("Failed to listen: %v", err)
+			time.Sleep(1 * time.Minute)
+			continue
+		}
+		log.Println("Listening on +6697")
+
+	accept:
+		for {
+			select {
+			case _ = <-s.restartssl:
+				break accept
+			default:
+				conn, err := listen.Accept()
+				if err != nil {
+					log.Println("Error accepting connection:", err)
+					continue
+				}
+				go s.handleConnection(conn, true)
+			}
+		}
+		listen.Close()
 	}
 }
 
@@ -557,6 +592,23 @@ func (s *Server) pingClients() {
 		}
 		time.Sleep(90 * time.Second)
 	}
+}
+
+func (s *Server) loadConfig() {
+	s.Lock()
+	if _, err := os.Stat("anonircd.conf"); err == nil {
+		if _, err := toml.DecodeFile("anonircd.conf", &s.config); err != nil {
+			log.Fatalf("Failed to read anonircd.conf: %v", err)
+		}
+	}
+	s.Unlock()
+}
+
+func (s *Server) reload() {
+	log.Println("Reloading configuration")
+	s.loadConfig()
+	s.restartplain <- true
+	s.restartssl <- true
 }
 
 func (s *Server) listen() {

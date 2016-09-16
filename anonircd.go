@@ -23,10 +23,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	irc "gopkg.in/sorcix/irc.v2"
-	"log"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 var anonymous = irc.Prefix{"Anonymous", "Anon", "IRC"}
@@ -40,11 +40,6 @@ _|    _|  _|    _|  _|    _|  _|    _|    _|    _|    _|  _|
 _|    _|  _|    _|    _|_|    _|    _|  _|_|_|  _|    _|    _|_|_|
 `
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-type Config struct {
-	SSLCert string
-	SSLKey  string
-}
 
 type Pair struct {
 	Key   string
@@ -85,13 +80,16 @@ func randomIdentifier() string {
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	var config Config
-	if _, err := os.Stat("anonircd.conf"); err == nil {
-		if _, err := toml.DecodeFile("anonircd.conf", &config); err != nil {
-			log.Fatalf("Failed to read anonircd.conf: %v", err)
-		}
-	}
+	server := Server{&Config{}, time.Now().Unix(), make(map[string]*Client), make(map[string]*Channel), make(chan bool, 1), make(chan bool, 1), new(sync.RWMutex)}
+	server.loadConfig()
 
-	server := Server{&config, time.Now().Unix(), make(map[string]*Client), make(map[string]*Channel), new(sync.RWMutex)}
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup,
+		syscall.SIGHUP)
+	go func() {
+		_ = <-sighup
+		server.reload()
+	}()
+
 	server.listen()
 }
