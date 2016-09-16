@@ -15,13 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-
 package main
 
 import (
+	"math/rand"
 	"sort"
 	"sync"
-	"math/rand"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -31,7 +30,7 @@ import (
 )
 
 var anonymous = irc.Prefix{"Anonymous", "Anon", "IRC"}
-var anonirc = irc.Prefix{Name:"AnonIRC"}
+var anonirc = irc.Prefix{Name: "AnonIRC"}
 
 const motd = `
   _|_|                                  _|_|_|  _|_|_|      _|_|_|

@@ -1,9 +1,9 @@
 package main
 
 import (
-	"sync"
-	"strings"
 	"fmt"
+	"strings"
+	"sync"
 )
 
 const ENTITY_CLIENT = 0
