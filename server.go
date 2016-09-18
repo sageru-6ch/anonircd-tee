@@ -372,7 +372,7 @@ func (s *Server) handleRead(c *Client) {
 			s.partAllChannels(c.identifier)
 			return
 		}
-		if msg.Command != irc.PING && msg.Command != irc.PONG {
+		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
 			log.Println(c.identifier, "<-", fmt.Sprintf("%s", msg))
 		}
 		if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
@@ -489,7 +489,7 @@ func (s *Server) handleWrite(c *Client) {
 			msg.Params = append([]string{c.nick}, msg.Params...)
 		}
 
-		if msg.Command != irc.PING && msg.Command != irc.PONG {
+		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
 			log.Println(c.identifier, "->", msg)
 		}
 		c.writer.Encode(msg)
