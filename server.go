@@ -109,7 +109,7 @@ func (s *Server) joinChannel(channel string, client string) {
 	s.channels[channel].clients[client] = s.getClientCount(channel, client)
 	s.channels[channel].Unlock()
 
-	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.JOIN, []string{channel}}
+	s.clients[client].write(&irc.Message{s.clients[client].getPrefix(), irc.JOIN, []string{channel}})
 
 	s.sendNames(channel, client)
 	s.updateClientCount(channel, "")
@@ -121,7 +121,7 @@ func (s *Server) partChannel(channel string, client string, reason string) {
 		return
 	}
 
-	s.clients[client].writebuffer <- &irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel, reason}}
+	s.clients[client].write(&irc.Message{s.clients[client].getPrefix(), irc.PART, []string{channel, reason}})
 
 	s.channels[channel].Lock()
 	delete(s.channels[channel].clients, client)
@@ -166,7 +166,7 @@ func (s *Server) updateClientCount(channel string, client string) {
 		if ccount < chancount {
 			s.channels[channel].Lock()
 			for i := ccount; i < chancount; i++ {
-				s.clients[cclient].writebuffer <- &irc.Message{s.getAnonymousPrefix(i), irc.JOIN, []string{channel}}
+				s.clients[cclient].write(&irc.Message{s.getAnonymousPrefix(i), irc.JOIN, []string{channel}})
 			}
 
 			s.channels[channel].clients[cclient] = chancount
@@ -174,7 +174,7 @@ func (s *Server) updateClientCount(channel string, client string) {
 		} else if ccount > chancount {
 			s.channels[channel].Lock()
 			for i := ccount; i > chancount; i-- {
-				s.clients[cclient].writebuffer <- &irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}}
+				s.clients[cclient].write(&irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}})
 			}
 
 			s.channels[channel].clients[cclient] = chancount
@@ -202,8 +202,8 @@ func (s *Server) sendNames(channel string, clientname string) {
 			}
 		}
 
-		c.writebuffer <- &irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}}
-		c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}}
+		c.write(&irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}})
+		c.write(&irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}})
 	}
 }
 
@@ -219,10 +219,10 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 			tprefix = anonirc
 			tcommand = irc.RPL_TOPIC
 		}
-		s.clients[client].writebuffer <- &irc.Message{&tprefix, tcommand, []string{channel, s.channels[channel].topic}}
+		s.clients[client].write(&irc.Message{&tprefix, tcommand, []string{channel, s.channels[channel].topic}})
 
 		if !changed {
-			s.clients[client].writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, s.clients[client].nick, channel, "Anonymous", fmt.Sprintf("%d", s.channels[channel].topictime)}, " "), nil}
+			s.clients[client].write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, s.clients[client].nick, channel, "Anonymous", fmt.Sprintf("%d", s.channels[channel].topictime)}, " "), nil})
 		}
 	}
 }
@@ -260,10 +260,10 @@ func (s *Server) handleMode(c *Client, params []string) {
 
 		channel := s.channels[params[0]]
 		if len(params) == 1 || params[1] == "" {
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], channel.printModes(channel.modes, nil)}, " "), []string{}}
+			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], channel.printModes(channel.modes, nil)}, " "), []string{}})
 
 			// Send channel creation time
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(channel.created))}, " "), []string{}}
+			c.write(&irc.Message{&anonirc, strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(channel.created))}, " "), []string{}})
 		} else if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
 			lastmodes := make(map[string]string)
 			for mode, modevalue := range channel.modes {
@@ -296,7 +296,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 				}
 
 				for sclient := range channel.clients {
-					s.clients[sclient].writebuffer <- &irc.Message{&anonymous, irc.MODE, []string{params[0], channel.printModes(addedmodes, removedmodes)}}
+					s.clients[sclient].write(&irc.Message{&anonymous, irc.MODE, []string{params[0], channel.printModes(addedmodes, removedmodes)}})
 				}
 
 				if resendusercount {
@@ -306,7 +306,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 		}
 	} else {
 		if len(params) == 1 || params[1] == "" {
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(c.modes, nil)}, " "), []string{}}
+			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(c.modes, nil)}, " "), []string{}})
 			return
 		}
 
@@ -340,7 +340,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 				addedmodes = c.modes
 			}
 
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(addedmodes, removedmodes)}}
+			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(addedmodes, removedmodes)}})
 
 			if resendusercount {
 				for ch := range s.getChannels(c.identifier) {
@@ -358,7 +358,7 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 
 	for sclient := range s.channels[channel].clients {
 		if s.clients[sclient].identifier != client {
-			s.clients[sclient].writebuffer <- &irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}}
+			s.clients[sclient].write(&irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}})
 		}
 	}
 }
@@ -376,30 +376,30 @@ func (s *Server) handleRead(c *Client) {
 			log.Println(c.identifier, "<-", fmt.Sprintf("%s", msg))
 		}
 		if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
-			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}}
+			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}})
 		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ {
 			if strings.Contains(msg.Trailing(), "userhost-in-names") {
 				c.capHostInNames = true
 			}
-			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{irc.CAP_ACK, msg.Trailing()}}
+			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_ACK, msg.Trailing()}})
 		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LIST {
 			caps := []string{}
 			if c.capHostInNames {
 				caps = append(caps, "userhost-in-names")
 			}
-			c.writebuffer <- &irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], strings.Join(caps, " ")}}
+			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], strings.Join(caps, " ")}})
 		} else if msg.Command == irc.PING {
-			c.writebuffer <- &irc.Message{&anonirc, irc.PONG + " AnonIRC", []string{msg.Trailing()}}
+			c.write(&irc.Message{&anonirc, irc.PONG + " AnonIRC", []string{msg.Trailing()}})
 		} else if msg.Command == irc.NICK && c.nick == "*" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] != "" && msg.Params[0] != "*" {
 			c.nick = strings.Trim(msg.Params[0], "\"")
 		} else if msg.Command == irc.USER && c.user == "" && len(msg.Params) >= 3 && msg.Params[0] != "" && msg.Params[2] != "" {
 			c.user = strings.Trim(msg.Params[0], "\"")
 			c.host = strings.Trim(msg.Params[2], "\"")
 
-			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()}}
-			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd"}}
-			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())}}
-			c.writebuffer <- &irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{}}
+			c.write(&irc.Message{&anonirc, irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()}})
+			c.write(&irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd"}})
+			c.write(&irc.Message{&anonirc, irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())}})
+			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{}})
 
 			motdsplit := strings.Split(motd, "\n")
 			for i, motdmsg := range motdsplit {
@@ -411,7 +411,7 @@ func (s *Server) handleRead(c *Client) {
 				} else {
 					motdcode = irc.RPL_ENDOFMOTD
 				}
-				c.writebuffer <- &irc.Message{&anonirc, motdcode, []string{"  " + motdmsg}}
+				c.write(&irc.Message{&anonirc, motdcode, []string{"  " + motdmsg}})
 			}
 
 			s.joinChannel("#", c.identifier)
@@ -425,11 +425,11 @@ func (s *Server) handleRead(c *Client) {
 				}
 			}
 
-			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTSTART, []string{"Channel", "Users Name"}}
+			c.write(&irc.Message{&anonirc, irc.RPL_LISTSTART, []string{"Channel", "Users Name"}})
 			for _, pl := range sortMapByValues(chans) {
-				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LIST, []string{pl.Key, strconv.Itoa(pl.Value), "[" + s.channels[pl.Key].printModes(s.channels[pl.Key].modes, nil) + "] " + s.channels[pl.Key].topic}}
+				c.write(&irc.Message{&anonirc, irc.RPL_LIST, []string{pl.Key, strconv.Itoa(pl.Value), "[" + s.channels[pl.Key].printModes(s.channels[pl.Key].modes, nil) + "] " + s.channels[pl.Key].topic}})
 			}
-			c.writebuffer <- &irc.Message{&anonirc, irc.RPL_LISTEND, []string{"End of /LIST"}}
+			c.write(&irc.Message{&anonirc, irc.RPL_LISTEND, []string{"End of /LIST"}})
 		} else if msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				s.joinChannel(channel, c.identifier)
@@ -451,14 +451,14 @@ func (s *Server) handleRead(c *Client) {
 							prfx = s.getAnonymousPrefix(i)
 						}
 
-						c.writebuffer <- &irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 Anonymous"}}
+						c.write(&irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 Anonymous"}})
 					}
-					c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}}
+					c.write(&irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}})
 				}
 			}
 		} else if msg.Command == irc.MODE {
 			if len(msg.Params) == 2 && msg.Params[0][0] == '#' && msg.Params[1] == "b" {
-				c.writebuffer <- &irc.Message{&anonirc, irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"}}
+				c.write(&irc.Message{&anonirc, irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"}})
 			} else {
 				s.handleMode(c, msg.Params)
 			}
@@ -473,26 +473,6 @@ func (s *Server) handleRead(c *Client) {
 		} else if msg.Command == irc.QUIT {
 			s.partAllChannels(c.identifier)
 		}
-	}
-}
-
-func (s *Server) handleWrite(c *Client) {
-	for msg := range c.writebuffer {
-		addnick := false
-		if _, err := strconv.Atoi(msg.Command); err == nil {
-			addnick = true
-		} else if msg.Command == irc.CAP {
-			addnick = true
-		}
-
-		if addnick {
-			msg.Params = append([]string{c.nick}, msg.Params...)
-		}
-
-		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
-			log.Println(c.identifier, "->", msg)
-		}
-		c.writer.Encode(msg)
 	}
 }
 
@@ -513,7 +493,7 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	s.clients[client.identifier] = &client
 	s.Unlock()
 
-	go s.handleWrite(&client)
+	go client.handleWrite()
 	s.handleRead(&client)
 }
 
@@ -587,9 +567,11 @@ func (s *Server) listenSSL() {
 
 func (s *Server) pingClients() {
 	for {
+		s.Lock()
 		for _, c := range s.clients {
-			c.writebuffer <- &irc.Message{nil, irc.PING, []string{fmt.Sprintf("anonirc%d%d", int32(time.Now().Unix()), rand.Intn(1000))}}
+			c.write(&irc.Message{nil, irc.PING, []string{fmt.Sprintf("anonirc%d%d", int32(time.Now().Unix()), rand.Intn(1000))}})
 		}
+		s.Unlock()
 		time.Sleep(90 * time.Second)
 	}
 }

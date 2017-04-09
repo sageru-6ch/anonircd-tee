@@ -4,6 +4,8 @@ import (
 	"net"
 
 	irc "gopkg.in/sorcix/irc.v2"
+	"log"
+	"strconv"
 )
 
 type Client struct {
@@ -27,6 +29,32 @@ func (c *Client) getPrefix() *irc.Prefix {
 	return &irc.Prefix{Name: c.nick, User: c.user, Host: c.host}
 }
 
+func (c *Client) write(msg *irc.Message) {
+	c.writebuffer <- msg
+}
+
+func (c *Client) handleWrite() {
+	for msg := range c.writebuffer {
+		c.Lock()
+		addnick := false
+		if _, err := strconv.Atoi(msg.Command); err == nil {
+			addnick = true
+		} else if msg.Command == irc.CAP {
+			addnick = true
+		}
+
+		if addnick {
+			msg.Params = append([]string{c.nick}, msg.Params...)
+		}
+
+		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
+			log.Println(c.identifier, "->", msg)
+		}
+		c.writer.Encode(msg)
+		c.Unlock()
+	}
+}
+
 func (c *Client) sendNotice(notice string) {
-	c.writebuffer <- &irc.Message{&anonirc, irc.NOTICE, []string{c.nick, "*** " + notice}}
+	c.write(&irc.Message{&anonirc, irc.NOTICE, []string{c.nick, "*** " + notice}})
 }
