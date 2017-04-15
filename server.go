@@ -147,11 +147,13 @@ func (s *Server) enforceModes(channel string) {
 }
 
 func (s *Server) getClientCount(channel string, client string) int {
-	if s.clients[client].hasMode("c") || s.channels[channel].hasMode("c") {
+	ccount := len(s.channels[channel].clients)
+
+	if (s.clients[client].hasMode("c") || s.channels[channel].hasMode("c")) && ccount >= 2 {
 		return 2
 	}
 
-	return len(s.channels[channel].clients)
+	return ccount
 }
 
 func (s *Server) updateClientCount(channel string, client string) {
@@ -163,9 +165,10 @@ func (s *Server) updateClientCount(channel string, client string) {
 	}
 	for cclient, ccount := range clients {
 		chancount := s.getClientCount(channel, cclient)
+
 		if ccount < chancount {
 			s.channels[channel].Lock()
-			for i := ccount; i < chancount; i++ {
+			for i := ccount; i < chancount - 1; i++ {
 				s.clients[cclient].write(&irc.Message{s.getAnonymousPrefix(i), irc.JOIN, []string{channel}})
 			}
 
@@ -173,8 +176,8 @@ func (s *Server) updateClientCount(channel string, client string) {
 			s.channels[channel].Unlock()
 		} else if ccount > chancount {
 			s.channels[channel].Lock()
-			for i := ccount; i > chancount; i-- {
-				s.clients[cclient].write(&irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}})
+			for i := ccount; i > chancount - 1; i-- {
+				s.clients[cclient].write(&irc.Message{s.getAnonymousPrefix(i), irc.PART, []string{channel}})
 			}
 
 			s.channels[channel].clients[cclient] = chancount
