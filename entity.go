@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/orcaman/concurrent-map"
 	"strings"
 	"sync"
 )
@@ -17,17 +18,21 @@ type Entity struct {
 	entitytype int
 	identifier string
 	created    int64
-	modes      map[string]string
+	modes      cmap.ConcurrentMap
 
 	*sync.RWMutex
 }
 
-func (e *Entity) hasMode(mode string) bool {
-	if _, ok := e.modes[mode]; ok {
-		return true
+func (e *Entity) getModes() map[string]string {
+	modes := make(map[string]string)
+	for ms := range e.modes.IterBuffered() {
+		modes[ms.Key] = ms.Val.(string)
 	}
+	return modes
+}
 
-	return false
+func (e *Entity) hasMode(mode string) bool {
+	return e.modes.Has(mode)
 }
 
 func (e *Entity) addMode(mode string, value string) {
@@ -39,7 +44,7 @@ func (e *Entity) addMode(mode string, value string) {
 	}
 
 	if strings.Index(allowedmodes, mode) != -1 && !e.hasMode(mode) {
-		e.modes[mode] = value
+		e.modes.Set(mode, value)
 	}
 }
 
@@ -51,7 +56,7 @@ func (e *Entity) addModes(modes string) {
 
 func (e *Entity) removeMode(mode string) {
 	if e.hasMode(mode) {
-		delete(e.modes, mode)
+		e.modes.Remove(mode)
 	}
 }
 
@@ -64,17 +69,18 @@ func (e *Entity) removeModes(modes string) {
 func (e *Entity) diffModes(lastmodes map[string]string) (map[string]string, map[string]string) {
 	addedmodes := make(map[string]string)
 	if lastmodes != nil {
-		for mode := range e.modes {
-			if _, ok := lastmodes[mode]; !ok {
-				addedmodes[mode] = lastmodes[mode]
+		for m := range e.modes.IterBuffered() {
+			if _, ok := lastmodes[m.Key]; !ok {
+				addedmodes[m.Key] = lastmodes[m.Key]
 			}
 		}
 	}
 
 	removedmodes := make(map[string]string)
 	for mode := range lastmodes {
-		if _, ok := e.modes[mode]; !ok {
-			removedmodes[mode] = e.modes[mode]
+		if e.hasMode(mode) {
+			m, _ := e.modes.Get(mode)
+			removedmodes[mode] = m.(string)
 		}
 	}
 
