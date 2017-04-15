@@ -9,16 +9,22 @@
 			"revisionTime": "2017-03-28T06:15:53Z"
 		},
 		{
-			"checksumSHA1": "mRNv6NTAfGphwvF7YzNk8XOhX10=",
+			"checksumSHA1": "70JYmBNhbn7E46Bk1F6zRppWnDg=",
+			"path": "github.com/orcaman/concurrent-map",
+			"revision": "2ae17bc4c860c83513ee50feb9746f3e50d7515d",
+			"revisionTime": "2017-03-28T08:05:53Z"
+		},
+		{
+			"checksumSHA1": "Czv0Jgt3IUNiIuHOzkPu4EcNMbk=",
 			"path": "gopkg.in/sorcix/irc.v2",
-			"revision": "63b1858457fa9439c5f37124100605a0b0d98bd8",
-			"revisionTime": "2016-05-13T12:23:15Z"
+			"revision": "b6c6bfcd035c95244a8b50de225b214ab678510a",
+			"revisionTime": "2017-03-29T09:19:25Z"
 		},
 		{
 			"checksumSHA1": "745d6gaBv5Ni3YrPvslpM4BoU6A=",
 			"path": "gopkg.in/sorcix/irc.v2/internal",
-			"revision": "63b1858457fa9439c5f37124100605a0b0d98bd8",
-			"revisionTime": "2016-05-13T12:23:15Z"
+			"revision": "b6c6bfcd035c95244a8b50de225b214ab678510a",
+			"revisionTime": "2017-03-29T09:19:25Z"
 		}
 	],
 	"rootPath": "github.com/tslocum/AnonIRCd"
