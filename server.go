@@ -186,12 +186,14 @@ func (s *Server) updateClientCount(channel string) {
 		cclient := cls.Key
 		ccount := cls.Val.(int)
 
-		chancount := s.getClientCount(channel, cclient)
 		cl := s.getClient(cclient)
 
 		if cl == nil {
 			continue
 		}
+
+		cl.Lock()
+		chancount := s.getClientCount(channel, cclient)
 
 		if ccount < chancount {
 			for i := ccount; i < chancount; i++ {
@@ -204,34 +206,41 @@ func (s *Server) updateClientCount(channel string) {
 				cl.write(&irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}})
 			}
 		} else {
+			cl.Unlock()
 			continue
 		}
 
 		ch.clients.Set(cclient, chancount)
+		cl.Unlock()
 	}
 }
 
 func (s *Server) sendNames(channel string, clientname string) {
 	if s.inChannel(channel, clientname) {
-		c := s.getClient(clientname)
+		cl := s.getClient(clientname)
+
+		if cl == nil {
+			return
+		}
+
 		names := []string{}
-		if c.capHostInNames {
-			names = append(names, c.getPrefix().String())
+		if cl.capHostInNames {
+			names = append(names, cl.getPrefix().String())
 		} else {
-			names = append(names, c.nick)
+			names = append(names, cl.nick)
 		}
 
 		ccount := s.getClientCount(channel, clientname)
 		for i := 1; i < ccount; i++ {
-			if c.capHostInNames {
+			if cl.capHostInNames {
 				names = append(names, s.getAnonymousPrefix(i).String())
 			} else {
 				names = append(names, s.getAnonymousPrefix(i).Name)
 			}
 		}
 
-		c.write(&irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}})
-		c.write(&irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}})
+		cl.write(&irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}})
+		cl.write(&irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}})
 	}
 }
 
@@ -419,15 +428,15 @@ func (s *Server) handleRead(c *Client) {
 	for {
 		c.conn.SetDeadline(time.Now().Add(300 * time.Second))
 
-		cl := s.getClient(c.identifier)
-
-		if cl == nil {
+		if !s.clients.Has(c.identifier) {
+			c.conn.Close()
 			return
 		}
 
-		msg, err := cl.reader.Decode()
+		msg, err := c.reader.Decode()
 		if err != nil {
 			log.Println("Unable to read from client:", err)
+			c.conn.Close()
 			s.partAllChannels(c.identifier)
 			return
 		}
