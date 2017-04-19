@@ -434,8 +434,7 @@ func (s *Server) handleRead(c *Client) {
 		}
 
 		msg, err := c.reader.Decode()
-		if err != nil {
-			log.Println("Unable to read from client:", err)
+		if msg == nil || err != nil {
 			c.conn.Close()
 			s.partAllChannels(c.identifier)
 			return
