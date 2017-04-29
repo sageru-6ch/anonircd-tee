@@ -1,0 +1,26 @@
+{
+	"ImportPath": "github.com/tslocum/AnonIRCd",
+	"GoVersion": "go1.7",
+	"GodepVersion": "v79",
+	"Deps": [
+		{
+			"ImportPath": "github.com/BurntSushi/toml",
+			"Comment": "v0.3.0",
+			"Rev": "b26d9c308763d68093482582cea63d69be07a0f0"
+		},
+		{
+			"ImportPath": "github.com/orcaman/concurrent-map",
+			"Rev": "2ae17bc4c860c83513ee50feb9746f3e50d7515d"
+		},
+		{
+			"ImportPath": "gopkg.in/sorcix/irc.v2",
+			"Comment": "v1.1.2-18-gb6c6bfc",
+			"Rev": "b6c6bfcd035c95244a8b50de225b214ab678510a"
+		},
+		{
+			"ImportPath": "gopkg.in/sorcix/irc.v2/internal",
+			"Comment": "v1.1.2-18-gb6c6bfc",
+			"Rev": "b6c6bfcd035c95244a8b50de225b214ab678510a"
+		}
+	]
+}
