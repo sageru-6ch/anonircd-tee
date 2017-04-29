@@ -25,6 +25,7 @@ import (
 
 	"github.com/orcaman/concurrent-map"
 	irc "gopkg.in/sorcix/irc.v2"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -41,6 +42,7 @@ _|    _|  _|    _|  _|    _|  _|    _|    _|    _|    _|  _|
 _|    _|  _|    _|    _|_|    _|    _|  _|_|_|  _|    _|    _|_|_|
 `
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const writebuffersize = 10
 
 type Pair struct {
 	Key   string
@@ -92,5 +94,6 @@ func main() {
 		server.reload()
 	}()
 
+	go server.startProfiling()
 	server.listen()
 }

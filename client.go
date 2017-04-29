@@ -35,7 +35,10 @@ func (c *Client) write(msg *irc.Message) {
 
 func (c *Client) handleWrite() {
 	for msg := range c.writebuffer {
-		c.Lock()
+		if msg == nil {
+			return
+		}
+
 		addnick := false
 		if _, err := strconv.Atoi(msg.Command); err == nil {
 			addnick = true
@@ -51,7 +54,6 @@ func (c *Client) handleWrite() {
 			log.Println(c.identifier, "->", msg)
 		}
 		c.writer.Encode(msg)
-		c.Unlock()
 	}
 }
 
