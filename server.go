@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"crypto/tls"
-	"github.com/BurntSushi/toml"
-	cmap "github.com/orcaman/concurrent-map"
-	irc "gopkg.in/sorcix/irc.v2"
 	"math/rand"
 	"net/http"
 	"os"
 	"reflect"
+
+	"github.com/BurntSushi/toml"
+	cmap "github.com/orcaman/concurrent-map"
+	irc "gopkg.in/sorcix/irc.v2"
 )
 
 type Config struct {
@@ -474,6 +475,12 @@ func (s *Server) handleRead(c *Client) {
 			}
 
 			s.joinChannel("#", c.identifier)
+		} else if msg.Command == irc.AWAY {
+			if len(msg.Params) > 0 {
+				c.write(&irc.Message{&anonirc, irc.RPL_NOWAWAY, []string{"You have been marked as being away"}})
+			} else {
+				c.write(&irc.Message{&anonirc, irc.RPL_UNAWAY, []string{"You are no longer marked as being away"}})
+			}
 		} else if msg.Command == irc.LIST {
 			chans := make(map[string]int)
 			for chs := range s.channels.IterBuffered() {

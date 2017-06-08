@@ -1,7 +1,8 @@
-AnonIRCd
---------
+# AnonIRCd
 
-#### Try it out!
+AnonIRCd is an anonymous IRC daemon.  All messages appear to be written by **Anonymous**.
+
+#### Try AnonIRCd by joining AnonIRC
 
 Connect to [**z.1chan.us:6667**](irc://z.1chan.us:6667) or [**:6697 (SSL)**](ircs://z.1chan.us:6697).
 
