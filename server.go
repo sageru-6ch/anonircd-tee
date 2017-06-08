@@ -1,19 +1,19 @@
 package main
 
 import (
+	"bufio"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
+	"net/http"
+	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"crypto/tls"
-	"math/rand"
-	"net/http"
-	"os"
-	"reflect"
 
 	"github.com/BurntSushi/toml"
 	cmap "github.com/orcaman/concurrent-map"
@@ -27,10 +27,12 @@ type Config struct {
 }
 
 type Server struct {
-	config   *Config
-	created  int64
-	clients  cmap.ConcurrentMap
-	channels cmap.ConcurrentMap
+	config       *Config
+	created      int64
+	clients      cmap.ConcurrentMap
+	channels     cmap.ConcurrentMap
+	odyssey      *os.File
+	odysseymutex *sync.RWMutex
 
 	restartplain chan bool
 	restartssl   chan bool
@@ -266,7 +268,7 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 		cl.write(&irc.Message{&tprefix, tcommand, []string{channel, ch.topic}})
 
 		if !changed {
-			cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, "Anonymous", fmt.Sprintf("%d", ch.topictime)}, " "), nil})
+			cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, anonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil})
 		}
 	}
 }
@@ -475,6 +477,29 @@ func (s *Server) handleRead(c *Client) {
 			}
 
 			s.joinChannel("#", c.identifier)
+		} else if msg.Command == irc.WHOIS && len(msg.Params) > 0 && len(msg.Params[0]) >= len(anonymous.Name) && strings.ToLower(msg.Params[0][:len(anonymous.Name)]) == strings.ToLower(anonymous.Name) {
+			go func() {
+				whoisindex := 1
+				if len(msg.Params[0]) > len(anonymous.Name) {
+					whoisindex, err = strconv.Atoi(msg.Params[0][len(anonymous.Name):])
+					if err != nil || whoisindex <= 1 {
+						return
+					}
+				}
+
+				whoisnick := anonymous.Name
+				if whoisindex > 1 {
+					whoisnick += strconv.Itoa(whoisindex)
+				}
+
+				easteregg := s.readOdyssey(whoisindex)
+				if easteregg == "" {
+					easteregg = "I am the owner of my actions, heir of my actions, actions are the womb (from which I have sprung), actions are my relations, actions are my protection. Whatever actions I do, good or bad, of these I shall become the heir."
+				}
+
+				c.write(&irc.Message{&anonirc, irc.RPL_AWAY, []string{whoisnick, easteregg}})
+				c.write(&irc.Message{&anonirc, irc.RPL_ENDOFWHOIS, []string{whoisnick, "End of /WHOIS list."}})
+			}()
 		} else if msg.Command == irc.AWAY {
 			if len(msg.Params) > 0 {
 				c.write(&irc.Message{&anonirc, irc.RPL_NOWAWAY, []string{"You have been marked as being away"}})
@@ -519,7 +544,7 @@ func (s *Server) handleRead(c *Client) {
 							prfx = s.getAnonymousPrefix(i)
 						}
 
-						c.write(&irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 Anonymous"}})
+						c.write(&irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 " + anonymous.Name}})
 					}
 					c.write(&irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}})
 				}
@@ -583,7 +608,7 @@ func (s *Server) listenPlain() {
 	for {
 		listen, err := net.Listen("tcp", ":6667")
 		if err != nil {
-			log.Println("Failed to listen: %v", err)
+			log.Printf("Failed to listen: %v", err)
 			time.Sleep(1 * time.Minute)
 			continue
 		}
@@ -616,14 +641,14 @@ func (s *Server) listenSSL() {
 
 		cert, err := tls.LoadX509KeyPair(s.config.SSLCert, s.config.SSLKey)
 		if err != nil {
-			log.Println("Failed to load SSL certificate: %v", err)
+			log.Printf("Failed to load SSL certificate: %v", err)
 			time.Sleep(1 * time.Minute)
 			continue
 		}
 
 		listen, err := tls.Listen("tcp", ":6697", &tls.Config{Certificates: []tls.Certificate{cert}})
 		if err != nil {
-			log.Println("Failed to listen: %v", err)
+			log.Printf("Failed to listen: %v", err)
 			time.Sleep(1 * time.Minute)
 			continue
 		}
@@ -673,6 +698,30 @@ func (s *Server) reload() {
 	s.loadConfig()
 	s.restartplain <- true
 	s.restartssl <- true
+}
+
+func (s *Server) readOdyssey(line int) string {
+	s.odysseymutex.Lock()
+	defer s.odysseymutex.Unlock()
+
+	scanner := bufio.NewScanner(s.odyssey)
+	currentline := 1
+	for scanner.Scan() {
+		if currentline == line {
+			s.odyssey.Seek(0, 0)
+			return scanner.Text()
+		}
+
+		currentline++
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Failed to read ODYSSEY: %v", err)
+		return ""
+	}
+
+	s.odyssey.Seek(0, 0)
+	return ""
 }
 
 func (s *Server) startProfiling() {

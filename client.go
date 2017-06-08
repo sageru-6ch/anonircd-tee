@@ -1,11 +1,11 @@
 package main
 
 import (
+	"log"
 	"net"
+	"strconv"
 
 	irc "gopkg.in/sorcix/irc.v2"
-	"log"
-	"strconv"
 )
 
 type Client struct {

@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/orcaman/concurrent-map"
 	"strings"
 	"sync"
+
+	"github.com/orcaman/concurrent-map"
 )
 
 const ENTITY_CLIENT = 0
