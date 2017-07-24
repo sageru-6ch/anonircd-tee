@@ -33,4 +33,4 @@
 //    // Methods from both Encoder and Decoder are available
 //    message, err := c.Decode()
 //
-package irc
+package irc // import "gopkg.in/sorcix/irc.v2"
