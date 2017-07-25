@@ -1,5 +1,8 @@
 # AnonIRCd
 
+[![Build Status](https://travis-ci.org/tslocum/AnonIRCd.svg?branch=master)](https://travis-ci.org/tslocum/AnonIRCd)
+[![GoDoc](https://godoc.org/github.com/tslocum/AnonIRCd?status.svg)](https://godoc.org/github.com/tslocum/AnonIRCd)
+
 AnonIRCd is an anonymous IRC daemon.  All messages appear to be written by **Anonymous**.
 
 #### Try AnonIRCd by joining AnonIRC
