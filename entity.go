@@ -14,8 +14,8 @@ const ENTITY_CHANNEL = 1
 const ENTITY_STATE_TERMINATING = 0
 const ENTITY_STATE_NORMAL = 1
 
-const CLIENT_MODES = "c"
-const CHANNEL_MODES = "cipstz"
+const CLIENT_MODES = "cD"
+const CHANNEL_MODES = "cDipstz"
 const CHANNEL_MODES_ARG = "kl"
 
 type Entity struct {

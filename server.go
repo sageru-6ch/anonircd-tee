@@ -127,7 +127,7 @@ func (s *Server) joinChannel(channel string, client string) {
 	cl.write(&irc.Message{cl.getPrefix(), irc.JOIN, []string{channel}})
 
 	s.sendNames(channel, client)
-	s.updateClientCount(channel)
+	s.updateClientCount(channel, client)
 	s.sendTopic(channel, client, false)
 }
 
@@ -142,7 +142,7 @@ func (s *Server) partChannel(channel string, client string, reason string) {
 	cl.write(&irc.Message{cl.getPrefix(), irc.PART, []string{channel, reason}})
 	ch.clients.Remove(client)
 
-	s.updateClientCount(channel)
+	s.updateClientCount(channel, client)
 }
 
 func (s *Server) partAllChannels(client string) {
@@ -180,7 +180,7 @@ func (s *Server) getClientCount(channel string, client string) int {
 	return ccount
 }
 
-func (s *Server) updateClientCount(channel string) {
+func (s *Server) updateClientCount(channel string, client string) {
 	ch := s.getChannel(channel)
 
 	if ch == nil {
@@ -190,6 +190,10 @@ func (s *Server) updateClientCount(channel string) {
 	for cls := range ch.clients.IterBuffered() {
 		cclient := cls.Key
 		ccount := cls.Val.(int)
+
+		if client != "" && ch.hasMode("D") && cclient != client {
+			continue
+		}
 
 		cl := s.getClient(cclient)
 
@@ -340,6 +344,9 @@ func (s *Server) handleMode(c *Client, params []string) {
 				if _, ok := removedmodes["c"]; ok {
 					resendusercount = true
 				}
+				if _, ok := removedmodes["D"]; ok {
+					resendusercount = true
+				}
 
 				if len(addedmodes) == 0 && len(removedmodes) == 0 {
 					addedmodes = c.getModes()
@@ -354,7 +361,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 				}
 
 				if resendusercount {
-					s.updateClientCount(params[0])
+					s.updateClientCount(params[0], c.identifier)
 				}
 			}
 		}
@@ -384,6 +391,9 @@ func (s *Server) handleMode(c *Client, params []string) {
 			if _, ok := removedmodes["c"]; ok {
 				resendusercount = true
 			}
+			if _, ok := removedmodes["D"]; ok {
+				resendusercount = true
+			}
 
 			if len(addedmodes) == 0 && len(removedmodes) == 0 {
 				addedmodes = c.getModes()
@@ -393,7 +403,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 
 			if resendusercount {
 				for ch := range s.getChannels(c.identifier) {
-					s.updateClientCount(ch)
+					s.updateClientCount(ch, c.identifier)
 				}
 			}
 		}
@@ -410,6 +420,8 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 	if ch == nil {
 		return
 	}
+
+	s.updateClientCount(channel, "")
 
 	for cls := range ch.clients.IterBuffered() {
 		ccl := s.getClient(cls.Key)
