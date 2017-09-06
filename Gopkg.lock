@@ -17,7 +17,7 @@
   branch = "v2"
   name = "gopkg.in/sorcix/irc.v2"
   packages = [".","internal"]
-  revision = "f43cef0f500f6de3fcd1e976fd87610a9e970dbc"
+  revision = "1b25be7f891d1bd0190ac0ef159da153c9ffa22a"
 
 [solve-meta]
   analyzer-name = "dep"

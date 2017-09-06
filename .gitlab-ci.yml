@@ -1,0 +1,24 @@
+image: golang:latest
+
+stages:
+  - test
+  - build
+
+before_script:
+  - go get -u github.com/golang/dep/cmd/dep 
+  - export GOPATH=$(dirname $CI_PROJECT_DIR)/go
+  - mkdir -p $GOPATH/src
+  - cd $GOPATH/src
+  - ln -s $CI_PROJECT_DIR
+  - cd $CI_PROJECT_NAME
+  - dep ensure -update
+
+test:
+  stage: test
+  script:
+    - go test
+
+build:
+  stage: build
+  script:
+    - go build
