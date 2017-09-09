@@ -40,6 +40,19 @@ type Server struct {
 	*sync.RWMutex
 }
 
+func NewServer() *Server {
+	s := &Server{}
+	s.created = time.Now().Unix()
+	s.clients = cmap.New()
+	s.channels = cmap.New()
+
+	s.restartplain = make(chan bool, 1)
+	s.restartssl = make(chan bool, 1)
+	s.RWMutex = new(sync.RWMutex)
+
+	return s
+}
+
 func (s *Server) getAnonymousPrefix(i int) *irc.Prefix {
 	prefix := anonymous
 	if i > 1 {
@@ -426,7 +439,7 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 	for cls := range ch.clients.IterBuffered() {
 		ccl := s.getClient(cls.Key)
 
-		if ccl.identifier != client {
+		if ccl != nil && ccl.identifier != client {
 			ccl.write(&irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}})
 		}
 	}
@@ -581,6 +594,30 @@ func (s *Server) handleRead(c *Client) {
 	}
 }
 
+func (s *Server) handleWrite(c *Client) {
+	for msg := range c.writebuffer {
+		if msg == nil {
+			return
+		}
+
+		addnick := false
+		if _, err := strconv.Atoi(msg.Command); err == nil {
+			addnick = true
+		} else if msg.Command == irc.CAP {
+			addnick = true
+		}
+
+		if addnick {
+			msg.Params = append([]string{c.nick}, msg.Params...)
+		}
+
+		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
+			log.Println(c.identifier, "->", msg)
+		}
+		c.writer.Encode(msg)
+	}
+}
+
 func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	defer conn.Close()
 	var identifier string
@@ -595,7 +632,7 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	client := &Client{Entity{ENTITY_CLIENT, identifier, time.Now().Unix(), ENTITY_STATE_NORMAL, cmap.New(), new(sync.RWMutex)}, ssl, "*", "", "", conn, make(chan *irc.Message, writebuffersize), irc.NewDecoder(conn), irc.NewEncoder(conn), false}
 	s.clients.Set(client.identifier, client)
 
-	go client.handleWrite()
+	go s.handleWrite(client)
 	s.handleRead(client)
 
 	s.killClient(client)

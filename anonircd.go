@@ -24,11 +24,9 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/orcaman/concurrent-map"
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
@@ -84,7 +82,7 @@ func randomIdentifier() string {
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	server := Server{&Config{}, time.Now().Unix(), cmap.New(), cmap.New(), nil, new(sync.RWMutex), make(chan bool, 1), make(chan bool, 1), new(sync.RWMutex)}
+	server := NewServer()
 	server.loadConfig()
 
 	sighup := make(chan os.Signal, 1)
