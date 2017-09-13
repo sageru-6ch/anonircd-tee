@@ -1,11 +1,13 @@
 package main
 
-import "github.com/orcaman/concurrent-map"
+import (
+	"sync"
+)
 
 type Channel struct {
 	Entity
 
-	clients cmap.ConcurrentMap
+	clients *sync.Map
 
 	topic     string
 	topictime int64
