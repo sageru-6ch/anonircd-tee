@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-
-	"github.com/orcaman/concurrent-map"
+	"time"
 )
 
 const ENTITY_CLIENT = 0
@@ -23,21 +22,32 @@ type Entity struct {
 	identifier string
 	created    int64
 	state      int
-	modes      cmap.ConcurrentMap
+	modes      *sync.Map
+}
 
-	*sync.RWMutex
+func (e *Entity) Initialize(etype int, identifier string) {
+	e.identifier = identifier
+	e.entitytype = etype
+	e.created = time.Now().Unix()
+	e.state = ENTITY_STATE_NORMAL
+	e.modes = new(sync.Map)
 }
 
 func (e *Entity) getModes() map[string]string {
 	modes := make(map[string]string)
-	for ms := range e.modes.IterBuffered() {
-		modes[ms.Key] = ms.Val.(string)
-	}
+	e.modes.Range(func(k, v interface{}) bool {
+		modes[k.(string)] = v.(string)
+
+		return true
+	})
+
 	return modes
 }
 
 func (e *Entity) hasMode(mode string) bool {
-	return e.modes.Has(mode)
+	_, ok := e.modes.Load(mode)
+
+	return ok
 }
 
 func (e *Entity) addMode(mode string, value string) {
@@ -49,7 +59,7 @@ func (e *Entity) addMode(mode string, value string) {
 	}
 
 	if strings.Index(allowedmodes, mode) != -1 && !e.hasMode(mode) {
-		e.modes.Set(mode, value)
+		e.modes.Store(mode, value)
 	}
 }
 
@@ -61,7 +71,7 @@ func (e *Entity) addModes(modes string) {
 
 func (e *Entity) removeMode(mode string) {
 	if e.hasMode(mode) {
-		e.modes.Remove(mode)
+		e.modes.Delete(mode)
 	}
 }
 
@@ -74,17 +84,18 @@ func (e *Entity) removeModes(modes string) {
 func (e *Entity) diffModes(lastmodes map[string]string) (map[string]string, map[string]string) {
 	addedmodes := make(map[string]string)
 	if lastmodes != nil {
-		for m := range e.modes.IterBuffered() {
-			if _, ok := lastmodes[m.Key]; !ok {
-				addedmodes[m.Key] = lastmodes[m.Key]
+		e.modes.Range(func(k, v interface{}) bool {
+			if _, ok := lastmodes[k.(string)]; !ok {
+				addedmodes[k.(string)] = lastmodes[k.(string)]
 			}
-		}
+
+			return true
+		})
 	}
 
 	removedmodes := make(map[string]string)
 	for mode := range lastmodes {
-		if e.hasMode(mode) {
-			m, _ := e.modes.Get(mode)
+		if m, ok := e.modes.Load(mode); ok {
 			removedmodes[mode] = m.(string)
 		}
 	}

@@ -23,6 +23,20 @@ type Client struct {
 	capHostInNames bool
 }
 
+func NewClient(identifier string, conn net.Conn, ssl bool) *Client {
+	c := &Client{}
+	c.Initialize(ENTITY_CLIENT, identifier)
+
+	c.ssl = ssl
+	c.nick = "*"
+	c.conn = conn
+	c.writebuffer = make(chan *irc.Message, writebuffersize)
+	c.reader = irc.NewDecoder(conn)
+	c.writer = irc.NewEncoder(conn)
+
+	return c
+}
+
 func (c *Client) getPrefix() *irc.Prefix {
 	return &irc.Prefix{Name: c.nick, User: c.user, Host: c.host}
 }
