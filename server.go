@@ -289,18 +289,16 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 		return
 	}
 
-	if ch.topic != "" {
-		tprefix := anonymous
-		tcommand := irc.TOPIC
-		if !changed {
-			tprefix = anonirc
-			tcommand = irc.RPL_TOPIC
-		}
-		cl.write(&irc.Message{&tprefix, tcommand, []string{channel, ch.topic}})
+	tprefix := anonymous
+	tcommand := irc.TOPIC
+	if !changed {
+		tprefix = anonirc
+		tcommand = irc.RPL_TOPIC
+	}
+	cl.write(&irc.Message{&tprefix, tcommand, []string{channel, ch.topic}})
 
-		if !changed {
-			cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, anonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil})
-		}
+	if !changed {
+		cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, anonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil})
 	}
 }
 
@@ -317,17 +315,13 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 		return
 	}
 
-	if topic != "" {
-		ch.topic = topic
-		ch.topictime = time.Now().Unix()
+	ch.topic = topic
+	ch.topictime = time.Now().Unix()
 
-		ch.clients.Range(func(k, v interface{}) bool {
-			s.sendTopic(channel, k.(string), true)
-			return true
-		})
-	} else {
-		s.sendTopic(channel, client, false)
-	}
+	ch.clients.Range(func(k, v interface{}) bool {
+		s.sendTopic(channel, k.(string), true)
+		return true
+	})
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
@@ -601,7 +595,11 @@ func (s *Server) handleRead(c *Client) {
 				s.handleMode(c, msg.Params)
 			}
 		} else if msg.Command == irc.TOPIC && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
-			s.handleTopic(msg.Params[0], c.identifier, msg.Trailing())
+			if len(msg.Params) == 1 {
+				s.sendTopic(msg.Params[0], c.identifier, false)
+			} else {
+				s.handleTopic(msg.Params[0], c.identifier, strings.Join(msg.Params[1:], " "))
+			}
 		} else if msg.Command == irc.PRIVMSG && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			s.handlePrivmsg(msg.Params[0], c.identifier, msg.Trailing())
 		} else if msg.Command == irc.PART && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
