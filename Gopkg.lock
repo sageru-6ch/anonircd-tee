@@ -8,12 +8,6 @@
   version = "v0.3.0"
 
 [[projects]]
-  branch = "master"
-  name = "github.com/orcaman/concurrent-map"
-  packages = ["."]
-  revision = "2ae17bc4c860c83513ee50feb9746f3e50d7515d"
-
-[[projects]]
   branch = "v2"
   name = "gopkg.in/sorcix/irc.v2"
   packages = [".","internal"]
@@ -22,6 +16,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "204144074458006bd79f81651581e678f9dfc09468db8c9faa41833302e67213"
+  inputs-digest = "0be9e577dd19c1613689669c289fb1cd6f32b0a47db9d3448a25d405cc1d456d"
   solver-name = "gps-cdcl"
   solver-version = 1

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/orcaman/concurrent-map"
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
@@ -42,9 +41,11 @@ type Server struct {
 
 func NewServer() *Server {
 	s := &Server{}
+	s.config = &Config{}
 	s.created = time.Now().Unix()
 	s.clients = new(sync.Map)
 	s.channels = new(sync.Map)
+	s.odysseymutex = new(sync.RWMutex)
 
 	s.restartplain = make(chan bool, 1)
 	s.restartssl = make(chan bool, 1)
@@ -102,7 +103,6 @@ func (s *Server) getClients(channel string) map[string]*Client {
 		if cl != nil {
 			clients[cl.identifier] = cl
 		}
-
 		return true
 	})
 
@@ -132,7 +132,7 @@ func (s *Server) joinChannel(channel string, client string) {
 	}
 
 	if ch == nil {
-		ch = &Channel{Entity{ENTITY_CHANNEL, channel, time.Now().Unix(), ENTITY_STATE_NORMAL, cmap.New(), new(sync.RWMutex)}, new(sync.Map), "", 0}
+		ch = NewChannel(channel)
 		s.channels.Store(channel, ch)
 	} else if ch.hasMode("z") && !cl.ssl {
 		cl.sendNotice("Unable to join " + channel + ": SSL connections only (channel mode +z)")
@@ -280,18 +280,16 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 		return
 	}
 
-	if ch.topic != "" {
-		tprefix := anonymous
-		tcommand := irc.TOPIC
-		if !changed {
-			tprefix = anonirc
-			tcommand = irc.RPL_TOPIC
-		}
-		cl.write(&irc.Message{&tprefix, tcommand, []string{channel, ch.topic}})
+	tprefix := anonymous
+	tcommand := irc.TOPIC
+	if !changed {
+		tprefix = anonirc
+		tcommand = irc.RPL_TOPIC
+	}
+	cl.write(&irc.Message{&tprefix, tcommand, []string{channel, ch.topic}})
 
-		if !changed {
-			cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, anonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil})
-		}
+	if !changed {
+		cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, anonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil})
 	}
 }
 
@@ -308,17 +306,13 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 		return
 	}
 
-	if topic != "" {
-		ch.topic = topic
-		ch.topictime = time.Now().Unix()
+	ch.topic = topic
+	ch.topictime = time.Now().Unix()
 
-		ch.clients.Range(func(k, v interface{}) bool {
-			s.sendTopic(channel, k.(string), true)
-			return true
-		})
-	} else {
-		s.sendTopic(channel, client, false)
-	}
+	ch.clients.Range(func(k, v interface{}) bool {
+		s.sendTopic(channel, k.(string), true)
+		return true
+	})
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
@@ -341,8 +335,8 @@ func (s *Server) handleMode(c *Client, params []string) {
 			c.write(&irc.Message{&anonirc, strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{}})
 		} else if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
 			lastmodes := make(map[string]string)
-			for ms := range ch.modes.IterBuffered() {
-				lastmodes[ms.Key] = ms.Val.(string)
+			for m, mv := range ch.getModes() {
+				lastmodes[m] = mv
 			}
 
 			if params[1][0] == '+' {
@@ -352,7 +346,7 @@ func (s *Server) handleMode(c *Client, params []string) {
 			}
 			s.enforceModes(params[0])
 
-			if !reflect.DeepEqual(ch.modes.Items(), lastmodes) {
+			if !reflect.DeepEqual(ch.getModes(), lastmodes) {
 				// TODO: Check if local modes were set/unset, only send changes to local client
 				addedmodes, removedmodes := ch.diffModes(lastmodes)
 
@@ -592,7 +586,11 @@ func (s *Server) handleRead(c *Client) {
 				s.handleMode(c, msg.Params)
 			}
 		} else if msg.Command == irc.TOPIC && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
-			s.handleTopic(msg.Params[0], c.identifier, msg.Trailing())
+			if len(msg.Params) == 1 {
+				s.sendTopic(msg.Params[0], c.identifier, false)
+			} else {
+				s.handleTopic(msg.Params[0], c.identifier, strings.Join(msg.Params[1:], " "))
+			}
 		} else if msg.Command == irc.PRIVMSG && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			s.handlePrivmsg(msg.Params[0], c.identifier, msg.Trailing())
 		} else if msg.Command == irc.PART && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
@@ -640,11 +638,11 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 		}
 	}
 
-	client := &Client{Entity{ENTITY_CLIENT, identifier, time.Now().Unix(), ENTITY_STATE_NORMAL, cmap.New(), new(sync.RWMutex)}, ssl, "*", "", "", conn, make(chan *irc.Message, writebuffersize), irc.NewDecoder(conn), irc.NewEncoder(conn), false}
+	client := NewClient(identifier, conn, ssl)
 	s.clients.Store(client.identifier, client)
 
 	go s.handleWrite(client)
-	s.handleRead(client)
+	s.handleRead(client) // Block until the connection is closed
 
 	s.killClient(client)
 	close(client.writebuffer)
