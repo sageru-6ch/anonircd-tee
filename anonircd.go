@@ -89,7 +89,7 @@ func main() {
 	signal.Notify(sighup,
 		syscall.SIGHUP)
 	go func() {
-		_ = <-sighup
+		<-sighup
 		server.reload()
 	}()
 

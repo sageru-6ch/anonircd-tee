@@ -85,7 +85,7 @@ func (s *Server) getChannels(client string) map[string]*Channel {
 }
 
 func (s *Server) getClient(client string) *Client {
-	if cl, ok := s.channels.Load(client); ok {
+	if cl, ok := s.clients.Load(client); ok {
 		return cl.(*Client)
 	}
 
@@ -107,14 +107,6 @@ func (s *Server) getClients(channel string) map[string]*Client {
 	})
 
 	return clients
-}
-
-func (s *Server) channelExists(channel string) bool {
-	if _, ok := s.channels.Load(channel); ok {
-		return true
-	}
-
-	return false
 }
 
 func (s *Server) inChannel(channel string, client string) bool {
@@ -143,7 +135,7 @@ func (s *Server) joinChannel(channel string, client string) {
 		ch = &Channel{Entity{ENTITY_CHANNEL, channel, time.Now().Unix(), ENTITY_STATE_NORMAL, cmap.New(), new(sync.RWMutex)}, new(sync.Map), "", 0}
 		s.channels.Store(channel, ch)
 	} else if ch.hasMode("z") && !cl.ssl {
-		cl.sendNotice("Unable to join " + channel + ": SSL connections only (channel mode +z)")///
+		cl.sendNotice("Unable to join " + channel + ": SSL connections only (channel mode +z)")
 		return
 	}
 
@@ -476,7 +468,7 @@ func (s *Server) handleRead(c *Client) {
 			return
 		}
 		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
-			log.Println(c.identifier, "<-", fmt.Sprintf("%s", msg))
+			log.Println(c.identifier, "<-", msg.String())
 		}
 		if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
 			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}})
@@ -685,7 +677,7 @@ func (s *Server) listenPlain() {
 	accept:
 		for {
 			select {
-			case _ = <-s.restartplain:
+			case <-s.restartplain:
 				break accept
 			default:
 				conn, err := listen.Accept()
@@ -725,7 +717,7 @@ func (s *Server) listenSSL() {
 	accept:
 		for {
 			select {
-			case _ = <-s.restartssl:
+			case <-s.restartssl:
 				break accept
 			default:
 				conn, err := listen.Accept()

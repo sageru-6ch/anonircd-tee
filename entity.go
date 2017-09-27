@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
@@ -48,14 +47,14 @@ func (e *Entity) addMode(mode string, value string) {
 		allowedmodes = CHANNEL_MODES
 	}
 
-	if strings.Index(allowedmodes, mode) != -1 && !e.hasMode(mode) {
+	if strings.Contains(allowedmodes, mode) && !e.hasMode(mode) {
 		e.modes.Set(mode, value)
 	}
 }
 
 func (e *Entity) addModes(modes string) {
 	for _, mode := range strings.Split(modes, "") {
-		e.addMode(fmt.Sprintf("%s", mode), "")
+		e.addMode(mode, "")
 	}
 }
 
@@ -67,7 +66,7 @@ func (e *Entity) removeMode(mode string) {
 
 func (e *Entity) removeModes(modes string) {
 	for _, mode := range strings.Split(modes, "") {
-		e.removeMode(fmt.Sprintf("%s", mode))
+		e.removeMode(mode)
 	}
 }
 
