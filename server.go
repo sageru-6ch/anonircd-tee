@@ -486,9 +486,9 @@ func (s *Server) handleRead(c *Client) {
 			c.host = strings.Trim(msg.Params[2], "\"")
 
 			c.write(&irc.Message{&anonirc, irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()}})
-			c.write(&irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd"}})
+			c.write(&irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd https://github.com/sageru-6ch/anonircd"}})
 			c.write(&irc.Message{&anonirc, irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())}})
-			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{}})
+			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC", "AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{}})
 
 			motdsplit := strings.Split(motd, "\n")
 			for i, motdmsg := range motdsplit {

@@ -1,6 +1,5 @@
 // AnonIRCd - Anonymous IRC daemon
-// https://gitlab.com/tslocum/anonircd
-// Written by Trevor 'tee' Slocum <tslocum@gmail.com>
+// https://github.com/sageru-6ch/anonircd
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by

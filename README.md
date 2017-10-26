@@ -1,7 +1,7 @@
 # AnonIRCd
 
-[![pipeline status](https://gitlab.com/tslocum/anonircd/badges/master/pipeline.svg)](https://gitlab.com/tslocum/anonircd/commits/master)
-[![godoc](https://godoc.org/gitlab.com/tslocum/anonircd?status.svg)](https://godoc.org/gitlab.com/tslocum/anonircd)
+[![Build Status](https://travis-ci.org/sageru-6ch/anonircd.svg?branch=master)](https://travis-ci.org/sageru-6ch/anonircd)
+[![GoDoc](https://godoc.org/github.com/sageru-6ch/anonircd?status.svg)](https://godoc.org/github.com/sageru-6ch/anonircd)
 
 AnonIRCd is an anonymous IRC daemon.  All messages appear to be written by **Anonymous**.
 
