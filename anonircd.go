@@ -17,15 +17,17 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"sort"
 	"syscall"
 	"time"
 
+	"github.com/jessevdk/go-flags"
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
@@ -42,63 +44,50 @@ _|    _|  _|    _|    _|_|    _|    _|  _|_|_|  _|    _|    _|_|_|
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 const writebuffersize = 10
 
-type Pair struct {
-	Key   string
-	Value int
-}
-
-type PairList []Pair
-
-func (p PairList) Len() int {
-	return len(p)
-}
-func (p PairList) Less(i, j int) bool {
-	return p[i].Value < p[j].Value
-}
-func (p PairList) Swap(i, j int) {
-	p[i], p[j] = p[j], p[i]
-}
-
-func sortMapByValues(m map[string]int) PairList {
-	pl := make(PairList, len(m))
-	i := 0
-	for k, v := range m {
-		pl[i] = Pair{k, v}
-		i++
-	}
-	sort.Sort(sort.Reverse(pl))
-	return pl
-}
-
-func randomIdentifier() string {
-	b := make([]byte, 10)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
-}
+var debugmode = false
 
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	server := NewServer()
-	server.loadConfig()
+	var opts struct {
+		ConfigFile string `short:"c" long:"config" description:"Configuration file"`
+		BareLog    bool   `short:"b" long:"bare-log" description:"Don't add current date/time to log entries"`
+		Debug      int    `short:"d" long:"debug" description:"Enable debug mode and serve pprof data on specified port"`
+	}
+
+	_, err := flags.Parse(&opts)
+	if err != nil {
+		panic(err)
+	}
+
+	if opts.BareLog {
+		log.SetFlags(0)
+	}
+
+	if opts.Debug > 0 {
+		log.Printf("WARNING: Running in debug mode. pprof data is available at http://localhost:%d/debug/pprof/", opts.Debug)
+		debugmode = true
+		go http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Debug), nil)
+	}
+
+	s := NewServer(opts.ConfigFile)
+	s.loadConfig()
+	s.connectDatabase()
+	defer s.closeDatabase()
 
 	sighup := make(chan os.Signal, 1)
 	signal.Notify(sighup,
 		syscall.SIGHUP)
 	go func() {
 		<-sighup
-		server.reload()
+		s.reload()
 	}()
 
-	var err error
-	server.odyssey, err = os.Open("ODYSSEY")
+	s.odyssey, err = os.Open("ODYSSEY")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer server.odyssey.Close()
+	defer s.odyssey.Close()
 
-	go server.startProfiling()
-	server.listen()
+	s.listen()
 }

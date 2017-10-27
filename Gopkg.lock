@@ -8,6 +8,36 @@
   version = "v0.3.0"
 
 [[projects]]
+  name = "github.com/jessevdk/go-flags"
+  packages = ["."]
+  revision = "96dc06278ce32a0e9d957d590bb987c81ee66407"
+  version = "v1.3.0"
+
+[[projects]]
+  name = "github.com/mattn/go-sqlite3"
+  packages = ["."]
+  revision = "5160b48509cf5c877bc22c11c373f8c7738cdb38"
+  version = "v1.3.0"
+
+[[projects]]
+  name = "github.com/pkg/errors"
+  packages = ["."]
+  revision = "645ef00459ed84a119197bfb8d8205042c6df63d"
+  version = "v0.8.0"
+
+[[projects]]
+  branch = "master"
+  name = "golang.org/x/crypto"
+  packages = ["sha3"]
+  revision = "bd6f299fb381e4c3393d1c4b1f0b94f5e77650c8"
+
+[[projects]]
+  branch = "master"
+  name = "golang.org/x/net"
+  packages = ["context"]
+  revision = "01c190206fbdffa42f334f4b2bf2220f50e64920"
+
+[[projects]]
   branch = "v2"
   name = "gopkg.in/sorcix/irc.v2"
   packages = [".","internal"]
@@ -16,6 +46,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "0be9e577dd19c1613689669c289fb1cd6f32b0a47db9d3448a25d405cc1d456d"
+  inputs-digest = "717a4b7569c94eaeff7dd55fc9fad93e9bf20ef2c3ff62516fd61a601222e370"
   solver-name = "gps-cdcl"
   solver-version = 1

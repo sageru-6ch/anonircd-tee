@@ -3,11 +3,11 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
-	"net/http"
 	"os"
 	"reflect"
 	"strconv"
@@ -16,18 +16,23 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/crypto/sha3"
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
 type Config struct {
-	SSLCert       string
-	SSLKey        string
-	ProfilingPort int
+	Salt     string
+	DBDriver string
+	DBSource string
+	SSLCert  string
+	SSLKey   string
 }
 
 type Server struct {
 	config       *Config
+	configfile   string
 	created      int64
+	db           *Database
 	clients      *sync.Map
 	channels     *sync.Map
 	odyssey      *os.File
@@ -39,10 +44,12 @@ type Server struct {
 	*sync.RWMutex
 }
 
-func NewServer() *Server {
+func NewServer(configfile string) *Server {
 	s := &Server{}
 	s.config = &Config{}
+	s.configfile = configfile
 	s.created = time.Now().Unix()
+	s.db = new(Database)
 	s.clients = new(sync.Map)
 	s.channels = new(sync.Map)
 	s.odysseymutex = new(sync.RWMutex)
@@ -52,6 +59,16 @@ func NewServer() *Server {
 	s.RWMutex = new(sync.RWMutex)
 
 	return s
+}
+
+func (s *Server) hashPassword(username string, password string) string {
+	sha512 := sha3.New512()
+	_, err := sha512.Write([]byte(strings.Join([]string{username, s.config.Salt, password}, "-")))
+	if err != nil {
+		return ""
+	}
+
+	return base64.URLEncoding.EncodeToString(sha512.Sum(nil))
 }
 
 func (s *Server) getAnonymousPrefix(i int) *irc.Prefix {
@@ -449,7 +466,7 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 
 func (s *Server) handleRead(c *Client) {
 	for {
-		c.conn.SetDeadline(time.Now().Add(300 * time.Second))
+		c.conn.SetReadDeadline(time.Now().Add(300 * time.Second))
 
 		if _, ok := s.clients.Load(c.identifier); !ok {
 			s.killClient(c)
@@ -458,28 +475,15 @@ func (s *Server) handleRead(c *Client) {
 
 		msg, err := c.reader.Decode()
 		if msg == nil || err != nil {
+			log.Printf("Error decoding message %+v: %v", msg, err)
 			s.killClient(c)
 			return
 		}
-		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
-			log.Println(c.identifier, "<-", msg.String())
+		if debugmode || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG) {
+			log.Printf("%s -> %s", c.identifier, msg)
 		}
-		if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
-			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}})
-		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ {
-			if strings.Contains(msg.Trailing(), "userhost-in-names") {
-				c.capHostInNames = true
-			}
-			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_ACK, msg.Trailing()}})
-		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LIST {
-			caps := []string{}
-			if c.capHostInNames {
-				caps = append(caps, "userhost-in-names")
-			}
-			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], strings.Join(caps, " ")}})
-		} else if msg.Command == irc.PING {
-			c.write(&irc.Message{&anonirc, irc.PONG + " AnonIRC", []string{msg.Trailing()}})
-		} else if msg.Command == irc.NICK && c.nick == "*" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] != "" && msg.Params[0] != "*" {
+
+		if msg.Command == irc.NICK && c.nick == "*" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] != "" && msg.Params[0] != "*" {
 			c.nick = strings.Trim(msg.Params[0], "\"")
 		} else if msg.Command == irc.USER && c.user == "" && len(msg.Params) >= 3 && msg.Params[0] != "" && msg.Params[2] != "" {
 			c.user = strings.Trim(msg.Params[0], "\"")
@@ -504,6 +508,24 @@ func (s *Server) handleRead(c *Client) {
 			}
 
 			s.joinChannel("#", c.identifier)
+		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
+			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_LS, "userhost-in-names"}})
+		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ {
+			if strings.Contains(msg.Trailing(), "userhost-in-names") {
+				c.capHostInNames = true
+			}
+			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_ACK, msg.Trailing()}})
+		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LIST {
+			caps := []string{}
+			if c.capHostInNames {
+				caps = append(caps, "userhost-in-names")
+			}
+			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_LIST, strings.Join(caps, " ")}})
+		} else if msg.Command == irc.PING {
+			c.write(&irc.Message{&anonirc, irc.PONG + " AnonIRC", []string{msg.Trailing()}})
+		} else if c.user == "" {
+			// Client must identify before issuing remaining commands
+			return
 		} else if msg.Command == irc.WHOIS && len(msg.Params) > 0 && len(msg.Params[0]) >= len(anonymous.Name) && strings.ToLower(msg.Params[0][:len(anonymous.Name)]) == strings.ToLower(anonymous.Name) {
 			go func() {
 				whoisindex := 1
@@ -620,8 +642,8 @@ func (s *Server) handleWrite(c *Client) {
 			msg.Params = append([]string{c.nick}, msg.Params...)
 		}
 
-		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
-			log.Println(c.identifier, "->", msg)
+		if debugmode || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG) {
+			log.Printf("%s <- %s", c.identifier, msg)
 		}
 		c.writer.Encode(msg)
 	}
@@ -650,7 +672,7 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 }
 
 func (s *Server) killClient(c *Client) {
-	if c.state == ENTITY_STATE_TERMINATING {
+	if c == nil || c.state == ENTITY_STATE_TERMINATING {
 		return
 	}
 	c.state = ENTITY_STATE_TERMINATING
@@ -744,11 +766,35 @@ func (s *Server) pingClients() {
 	}
 }
 
+func (s *Server) connectDatabase() {
+	err := s.db.Connect(s.config.DBDriver, s.config.DBSource)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (s *Server) closeDatabase() {
+	err := s.db.Close()
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (s *Server) loadConfig() {
-	if _, err := os.Stat("anonircd.conf"); err == nil {
-		if _, err := toml.DecodeFile("anonircd.conf", &s.config); err != nil {
-			log.Fatalf("Failed to read anonircd.conf: %v", err)
-		}
+	if s.configfile == "" {
+		panic("Configuration file must be specified:  anonircd -c /home/user/anonircd/anonircd.conf")
+	}
+
+	if _, err := os.Stat(s.configfile); err != nil {
+		panic("Unable to find configuration file " + s.configfile)
+	}
+
+	if _, err := toml.DecodeFile(s.configfile, &s.config); err != nil {
+		log.Fatalf("Failed to read configuration file %s: %v", s.configfile, err)
+	}
+
+	if s.config.DBDriver == "" || s.config.DBSource == "" {
+		panic(fmt.Sprintf("DBDriver and DBSource must be configured in %s\nExample:\n\nDBDriver=\"sqlite3\"\nDBSource=\"/home/user/anonircd/anonircd.db\"", s.configfile))
 	}
 }
 
@@ -781,12 +827,6 @@ func (s *Server) readOdyssey(line int) string {
 
 	s.odyssey.Seek(0, 0)
 	return ""
-}
-
-func (s *Server) startProfiling() {
-	if s.config.ProfilingPort > 0 {
-		http.ListenAndServe(fmt.Sprintf("localhost:%d", s.config.ProfilingPort), nil)
-	}
 }
 
 func (s *Server) listen() {
