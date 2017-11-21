@@ -8,6 +8,7 @@ import (
 
 type Client struct {
 	Entity
+	ip string
 
 	ssl  bool
 	nick string
@@ -25,6 +26,7 @@ type Client struct {
 
 func NewClient(identifier string, conn net.Conn, ssl bool) *Client {
 	c := &Client{}
+	c.ip = conn.RemoteAddr().String()
 	c.Initialize(ENTITY_CLIENT, identifier)
 
 	c.ssl = ssl

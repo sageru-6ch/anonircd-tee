@@ -20,6 +20,8 @@ import (
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
+const COMMAND_REVEAL = "REVEAL"
+
 type Config struct {
 	Salt     string
 	DBDriver string
@@ -158,6 +160,7 @@ func (s *Server) joinChannel(channel string, client string) {
 
 	ch.clients.Store(client, s.getClientCount(channel, client)+1)
 	cl.write(&irc.Message{cl.getPrefix(), irc.JOIN, []string{channel}})
+	ch.Log(cl, irc.JOIN, "")
 
 	s.sendNames(channel, client)
 	s.updateClientCount(channel, client)
@@ -173,6 +176,7 @@ func (s *Server) partChannel(channel string, client string, reason string) {
 	}
 
 	cl.write(&irc.Message{cl.getPrefix(), irc.PART, []string{channel, reason}})
+	ch.Log(cl, irc.PART, "")
 	ch.clients.Delete(client)
 
 	s.updateClientCount(channel, client)
@@ -181,6 +185,20 @@ func (s *Server) partChannel(channel string, client string, reason string) {
 func (s *Server) partAllChannels(client string) {
 	for channelname := range s.getChannels(client) {
 		s.partChannel(channelname, client, "")
+	}
+}
+
+func (s *Server) revealChannel(channel string, client string, duration string) {
+	// TODO: Check auth again here to be sure
+	ch := s.getChannel(channel)
+	cl := s.getClient(client)
+	if ch == nil || cl == nil {
+		return
+	}
+
+	r := ch.Reveal(duration, 0)
+	for _, rev := range r {
+		cl.write(&irc.Message{&anonirc, irc.PRIVMSG, []string{cl.nick, rev}})
 	}
 }
 
@@ -330,6 +348,7 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 		s.sendTopic(channel, k.(string), true)
 		return true
 	})
+	ch.Log(cl, irc.TOPIC, ch.topic)
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
@@ -447,21 +466,23 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 	}
 
 	ch := s.getChannel(channel)
+	cl := s.getClient(client)
 
-	if ch == nil {
+	if ch == nil || cl == nil {
 		return
 	}
 
 	s.updateClientCount(channel, "")
 
 	ch.clients.Range(func(k, v interface{}) bool {
-		cl := s.getClient(k.(string))
-		if cl != nil && cl.identifier != client {
-			cl.write(&irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}})
+		chcl := s.getClient(k.(string))
+		if chcl != nil && chcl.identifier != client {
+			chcl.write(&irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}})
 		}
 
 		return true
 	})
+	ch.Log(cl, irc.PRIVMSG, message)
 }
 
 func (s *Server) handleRead(c *Client) {
@@ -621,6 +642,15 @@ func (s *Server) handleRead(c *Client) {
 			}
 		} else if msg.Command == irc.QUIT {
 			s.killClient(c)
+		}
+
+		// TODO: Filter here for logged in user
+		if msg.Command == COMMAND_REVEAL && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
+			d := ""
+			if len(msg.Params) > 1 {
+				d = msg.Params[1]
+			}
+			s.revealChannel(msg.Params[0], c.identifier, d)
 		}
 	}
 }
