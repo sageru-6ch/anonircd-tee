@@ -20,7 +20,9 @@ import (
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
-const COMMAND_REVEAL = "REVEAL"
+const (
+	COMMAND_REVEAL = "REVEAL"
+)
 
 type Config struct {
 	Salt     string
@@ -188,15 +190,21 @@ func (s *Server) partAllChannels(client string) {
 	}
 }
 
-func (s *Server) revealChannel(channel string, client string, duration string) {
+func (s *Server) revealChannel(channel string, client string, filterIdentifier string) {
 	// TODO: Check auth again here to be sure
 	ch := s.getChannel(channel)
 	cl := s.getClient(client)
-	if ch == nil || cl == nil {
+	if cl == nil {
+		return
+	} else if ch == nil {
+		cl.sendError("Unable to reveal, invalid channel specified")
+		return
+	} else if !ch.HasClient(client) {
+		cl.sendError("Unable to reveal, you are not in that channel")
 		return
 	}
 
-	r := ch.Reveal(duration, 0)
+	r := ch.Reveal(filterIdentifier)
 	for _, rev := range r {
 		cl.write(&irc.Message{&anonirc, irc.PRIVMSG, []string{cl.nick, rev}})
 	}
@@ -208,7 +216,7 @@ func (s *Server) enforceModes(channel string) {
 	if ch != nil && ch.hasMode("z") {
 		for client, cl := range s.getClients(channel) {
 			if !cl.ssl {
-				s.partChannel(channel, client, "Only SSL connections are allowed in this channel")
+				s.partChannel(channel, client, fmt.Sprintf("You must connect via SSL to join %s", channel))
 			}
 		}
 	}
@@ -482,7 +490,7 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 
 		return true
 	})
-	ch.Log(cl, irc.PRIVMSG, message)
+	ch.Log(cl, "CHAT", message)
 }
 
 func (s *Server) handleRead(c *Client) {
@@ -646,11 +654,11 @@ func (s *Server) handleRead(c *Client) {
 
 		// TODO: Filter here for logged in user
 		if msg.Command == COMMAND_REVEAL && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
-			d := ""
+			ri := ""
 			if len(msg.Params) > 1 {
-				d = msg.Params[1]
+				ri = msg.Params[1]
 			}
-			s.revealChannel(msg.Params[0], c.identifier, d)
+			s.revealChannel(msg.Params[0], c.identifier, ri)
 		}
 	}
 }

@@ -47,6 +47,10 @@ func (c *Client) write(msg *irc.Message) {
 	c.writebuffer <- msg
 }
 
+func (c *Client) sendError(msg string) {
+	c.write(&irc.Message{&anonirc, irc.PRIVMSG, []string{c.nick, "Error! " + msg}})
+}
+
 func (c *Client) sendNotice(notice string) {
 	c.write(&irc.Message{&anonirc, irc.NOTICE, []string{c.nick, "*** " + notice}})
 }

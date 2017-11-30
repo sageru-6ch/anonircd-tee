@@ -11,10 +11,12 @@ type Channel struct {
 	Entity
 
 	clients *sync.Map
-	logs    *ConcurrentSlice
+	logs    []*ChannelLog
 
 	topic     string
 	topictime int64
+
+	sync.RWMutex
 }
 
 type ChannelLog struct {
@@ -25,14 +27,17 @@ type ChannelLog struct {
 	Message   string
 }
 
-func (cl *ChannelLog) String() string {
-	return strings.TrimSpace(fmt.Sprintf("%d [%s] %s %s %s", cl.Timestamp, time.Unix(0, cl.Timestamp).Format(time.Stamp), cl.Client, cl.Action, cl.Message))
+func (cl *ChannelLog) Identifier(index int) string {
+	return fmt.Sprintf("%03d%02d", index+1, cl.Timestamp%100)
+}
+
+func (cl *ChannelLog) Print(index int, channel string) string {
+	return strings.TrimSpace(fmt.Sprintf("%s %s %5s %4s %s", time.Unix(0, cl.Timestamp).Format(time.Stamp), channel, cl.Identifier(index), cl.Action, cl.Message))
 }
 
 func NewChannel(identifier string) *Channel {
 	c := &Channel{}
 	c.Initialize(ENTITY_CHANNEL, identifier)
-	c.logs = NewConcurrentSlice()
 
 	c.clients = new(sync.Map)
 
@@ -40,22 +45,39 @@ func NewChannel(identifier string) *Channel {
 }
 
 func (c *Channel) Log(client *Client, action string, message string) {
-	// TODO: client identifier is hashed to be unique per channel
-	c.logs.Append(&ChannelLog{Timestamp: time.Now().UTC().UnixNano(), Client: client.identifier, IP: client.ip, Action: action, Message: message})
+	c.Lock()
+	defer c.Unlock()
+
+	// TODO: Log size limiting, max capacity will be 998 entries
+
+	c.logs = append(c.logs, &ChannelLog{Timestamp: time.Now().UTC().UnixNano(), Client: client.identifier, IP: client.ip, Action: action, Message: message})
 }
 
-func (c *Channel) Reveal(duration string, filtertime int64) []string {
-	// TODO: duration and client limiting (via nanosecond)
+func (c *Channel) Reveal(filterIdentifier string) []string {
+	c.RLock()
+	defer c.RUnlock()
+
+	// TODO:
 	// Trim old channel logs periodically
+	// Add pagination or simple shortened output by default and -all option
 	var ls []string
-	for i := range c.logs.Iter() {
-		l := i.Value.(*ChannelLog)
-		ls = append(ls, l.String())
+	for i, l := range c.logs {
+		if filterIdentifier == "" || l.Client == filterIdentifier {
+			ls = append(ls, l.Print(i, c.identifier))
+		}
 	}
 
 	if len(ls) == 0 {
 		ls = append(ls, "No matching logs were returned")
+	} else {
+		ls = append([]string{fmt.Sprintf("Revealing %s", c.identifier)}, ls...)
+		ls = append(ls, fmt.Sprintf("Finished revealing %s", c.identifier))
 	}
 
 	return ls
+}
+
+func (c *Channel) HasClient(client string) bool {
+	_, ok := c.clients.Load(client)
+	return ok
 }
