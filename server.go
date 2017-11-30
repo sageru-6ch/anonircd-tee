@@ -190,7 +190,7 @@ func (s *Server) partAllChannels(client string) {
 	}
 }
 
-func (s *Server) revealChannel(channel string, client string, filterIdentifier string) {
+func (s *Server) revealChannel(channel string, client string, page int) {
 	// TODO: Check auth again here to be sure
 	ch := s.getChannel(channel)
 	cl := s.getClient(client)
@@ -204,7 +204,7 @@ func (s *Server) revealChannel(channel string, client string, filterIdentifier s
 		return
 	}
 
-	r := ch.Reveal(filterIdentifier)
+	r := ch.Reveal(page)
 	for _, rev := range r {
 		cl.write(&irc.Message{&anonirc, irc.PRIVMSG, []string{cl.nick, rev}})
 	}
@@ -654,11 +654,18 @@ func (s *Server) handleRead(c *Client) {
 
 		// TODO: Filter here for logged in user
 		if msg.Command == COMMAND_REVEAL && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
-			ri := ""
+			page := 1
 			if len(msg.Params) > 1 {
-				ri = msg.Params[1]
+				page, err = strconv.Atoi(msg.Params[1])
+				if err != nil || page < -1 || page == 0 {
+					c.sendError("Unable to reveal, invalid page specified")
+					return
+				}
 			}
-			s.revealChannel(msg.Params[0], c.identifier, ri)
+
+			s.revealChannel(msg.Params[0], c.identifier, page)
+		} else if msg.Command == irc.KICK && len(msg.Params) > 2 && len(msg.Params[0]) > 0 && len(msg.Params[1]) > 0 {
+			// TODO
 		}
 	}
 }

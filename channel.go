@@ -27,6 +27,8 @@ type ChannelLog struct {
 	Message   string
 }
 
+const CHANNEL_LOGS_PER_PAGE = 25
+
 func (cl *ChannelLog) Identifier(index int) string {
 	return fmt.Sprintf("%03d%02d", index+1, cl.Timestamp%100)
 }
@@ -53,25 +55,41 @@ func (c *Channel) Log(client *Client, action string, message string) {
 	c.logs = append(c.logs, &ChannelLog{Timestamp: time.Now().UTC().UnixNano(), Client: client.identifier, IP: client.ip, Action: action, Message: message})
 }
 
-func (c *Channel) Reveal(filterIdentifier string) []string {
+func (c *Channel) Reveal(page int) []string {
 	c.RLock()
 	defer c.RUnlock()
 
 	// TODO:
 	// Trim old channel logs periodically
-	// Add pagination or simple shortened output by default and -all option
+	// Add pagination
 	var ls []string
+	logsRemain := false
+	j := 0
 	for i, l := range c.logs {
-		if filterIdentifier == "" || l.Client == filterIdentifier {
+		if page == -1 || i >= (len(c.logs)-(CHANNEL_LOGS_PER_PAGE*page)) {
+			if page > -1 && j == CHANNEL_LOGS_PER_PAGE-1 {
+				logsRemain = true
+				break
+			}
 			ls = append(ls, l.Print(i, c.identifier))
+			j++
 		}
 	}
 
 	if len(ls) == 0 {
 		ls = append(ls, "No matching logs were returned")
 	} else {
-		ls = append([]string{fmt.Sprintf("Revealing %s", c.identifier)}, ls...)
-		ls = append(ls, fmt.Sprintf("Finished revealing %s", c.identifier))
+		filterType := "all"
+		if page > -1 {
+			filterType = fmt.Sprintf("page %d", page)
+		}
+		ls = append([]string{fmt.Sprintf("Revealing %s (%s)", c.identifier, filterType)}, ls...)
+
+		finishedMessage := fmt.Sprintf("Finished revealing %s", c.identifier)
+		if logsRemain {
+			finishedMessage = fmt.Sprintf("Additional logs on page %d", page+1)
+		}
+		ls = append(ls, finishedMessage)
 	}
 
 	return ls
