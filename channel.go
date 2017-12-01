@@ -66,8 +66,8 @@ func (c *Channel) Reveal(page int) []string {
 	logsRemain := false
 	j := 0
 	for i, l := range c.logs {
-		if page == -1 || i >= (len(c.logs)-(CHANNEL_LOGS_PER_PAGE*page)) {
-			if page > -1 && j == CHANNEL_LOGS_PER_PAGE-1 {
+		if page == -1 || i >= (CHANNEL_LOGS_PER_PAGE*(page-1)) {
+			if page > -1 && j == CHANNEL_LOGS_PER_PAGE {
 				logsRemain = true
 				break
 			}
