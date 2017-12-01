@@ -10,10 +10,11 @@ type Client struct {
 	Entity
 	ip string
 
-	ssl  bool
-	nick string
-	user string
-	host string
+	permission int
+	ssl        bool
+	nick       string
+	user       string
+	host       string
 
 	conn        net.Conn
 	writebuffer chan *irc.Message
@@ -29,6 +30,7 @@ func NewClient(identifier string, conn net.Conn, ssl bool) *Client {
 	c.ip = conn.RemoteAddr().String()
 	c.Initialize(ENTITY_CLIENT, identifier)
 
+	c.permission = PERMISSION_USER
 	c.ssl = ssl
 	c.nick = "*"
 	c.conn = conn
@@ -52,5 +54,5 @@ func (c *Client) sendError(msg string) {
 }
 
 func (c *Client) sendNotice(notice string) {
-	c.write(&irc.Message{&anonirc, irc.NOTICE, []string{c.nick, "*** " + notice}})
+	c.write(&irc.Message{&anonirc, irc.PRIVMSG, []string{c.nick, "*** " + notice}})
 }

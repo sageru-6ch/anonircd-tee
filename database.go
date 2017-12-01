@@ -12,13 +12,6 @@ import (
 
 const DATABASE_VERSION = 1
 
-const (
-	PERMISSION_SUPERADMIN = 1
-	PERMISSION_ADMIN      = 2
-	PERMISSION_MODERATOR  = 3
-	PERMISSION_VIP        = 4
-)
-
 var tables = map[string][]string{
 	"meta": {
 		"`key` TEXT NULL PRIMARY KEY",

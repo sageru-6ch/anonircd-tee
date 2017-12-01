@@ -44,15 +44,24 @@ _|    _|  _|    _|    _|_|    _|    _|  _|_|_|  _|    _|    _|_|_|
 const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 const writebuffersize = 10
 
-var debugmode = false
+const (
+	PERMISSION_USER       = 0
+	PERMISSION_SUPERADMIN = 1
+	PERMISSION_ADMIN      = 2
+	PERMISSION_MODERATOR  = 3
+	PERMISSION_VIP        = 4
+)
+
+var verbose = false
 
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	var opts struct {
 		ConfigFile string `short:"c" long:"config" description:"Configuration file"`
+		Debug      int    `short:"d" long:"debug" description:"Serve pprof data on specified port"`
 		BareLog    bool   `short:"b" long:"bare-log" description:"Don't add current date/time to log entries"`
-		Debug      int    `short:"d" long:"debug" description:"Enable debug mode and serve pprof data on specified port"`
+		Verbose    bool   `short:"v" long:"verbose" description:"Log verbosely"`
 	}
 
 	_, err := flags.Parse(&opts)
@@ -60,15 +69,16 @@ func main() {
 		panic(err)
 	}
 
+	if opts.Debug > 0 {
+		log.Printf("WARNING: Running in debug mode. pprof data is available at http://localhost:%d/debug/pprof/", opts.Debug)
+		go http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Debug), nil)
+	}
+
 	if opts.BareLog {
 		log.SetFlags(0)
 	}
 
-	if opts.Debug > 0 {
-		log.Printf("WARNING: Running in debug mode. pprof data is available at http://localhost:%d/debug/pprof/", opts.Debug)
-		debugmode = true
-		go http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Debug), nil)
-	}
+	verbose = opts.Verbose
 
 	s := NewServer(opts.ConfigFile)
 	s.loadConfig()

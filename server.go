@@ -21,7 +21,13 @@ import (
 )
 
 const (
-	COMMAND_REVEAL = "REVEAL"
+	COMMAND_HELP    = "HELP"
+	COMMAND_REVEAL  = "REVEAL"
+	COMMAND_KICK    = "KICK"
+	COMMAND_BAN     = "BAN"
+	COMMAND_KILL    = "KILL"
+	COMMAND_REHASH  = "REHASH"
+	COMMAND_UPGRADE = "UPGRADE"
 )
 
 type Config struct {
@@ -96,7 +102,7 @@ func (s *Server) getChannels(client string) map[string]*Channel {
 	s.channels.Range(func(k, v interface{}) bool {
 		key := k.(string)
 		channel := v.(*Channel)
-		if s.inChannel(key, client) {
+		if client == "" || s.inChannel(key, client) {
 			channels[key] = channel
 		}
 
@@ -121,7 +127,7 @@ func (s *Server) getClients(channel string) map[string]*Client {
 
 	ch.clients.Range(func(k, v interface{}) bool {
 		cl := s.getClient(k.(string))
-		if cl != nil {
+		if channel == "" || cl != nil {
 			clients[cl.identifier] = cl
 		}
 		return true
@@ -191,12 +197,14 @@ func (s *Server) partAllChannels(client string) {
 }
 
 func (s *Server) revealChannel(channel string, client string, page int) {
-	// TODO: Check auth again here to be sure
-	ch := s.getChannel(channel)
 	cl := s.getClient(client)
 	if cl == nil {
 		return
-	} else if ch == nil {
+	}
+
+	// TODO: Check channel permission
+	ch := s.getChannel(channel)
+	if ch == nil {
 		cl.sendError("Unable to reveal, invalid channel specified")
 		return
 	} else if !ch.HasClient(client) {
@@ -283,32 +291,34 @@ func (s *Server) updateClientCount(channel string, client string) {
 }
 
 func (s *Server) sendNames(channel string, clientname string) {
-	if s.inChannel(channel, clientname) {
-		cl := s.getClient(clientname)
-
-		if cl == nil {
-			return
-		}
-
-		names := []string{}
-		if cl.capHostInNames {
-			names = append(names, cl.getPrefix().String())
-		} else {
-			names = append(names, cl.nick)
-		}
-
-		ccount := s.getClientCount(channel, clientname)
-		for i := 1; i < ccount; i++ {
-			if cl.capHostInNames {
-				names = append(names, s.getAnonymousPrefix(i).String())
-			} else {
-				names = append(names, s.getAnonymousPrefix(i).Name)
-			}
-		}
-
-		cl.write(&irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}})
-		cl.write(&irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}})
+	if !s.inChannel(channel, clientname) {
+		return
 	}
+
+	cl := s.getClient(clientname)
+
+	if cl == nil {
+		return
+	}
+
+	names := []string{}
+	if cl.capHostInNames {
+		names = append(names, cl.getPrefix().String())
+	} else {
+		names = append(names, cl.nick)
+	}
+
+	ccount := s.getClientCount(channel, clientname)
+	for i := 1; i < ccount; i++ {
+		if cl.capHostInNames {
+			names = append(names, s.getAnonymousPrefix(i).String())
+		} else {
+			names = append(names, s.getAnonymousPrefix(i).Name)
+		}
+	}
+
+	cl.write(&irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}})
+	cl.write(&irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}})
 }
 
 func (s *Server) sendTopic(channel string, client string, changed bool) {
@@ -468,15 +478,82 @@ func (s *Server) handleMode(c *Client, params []string) {
 	}
 }
 
+func (s *Server) handleUserCommand(client string, command string, params []string) {
+	cl := s.getClient(client)
+	if cl == nil {
+		return
+	}
+
+	var err error
+	command = strings.ToUpper(command)
+	switch command {
+	case COMMAND_HELP:
+		cl.sendNotice("Available commands: REVEAL, KICK, BAN")
+		return
+	case COMMAND_REVEAL:
+		if len(params) == 0 {
+			cl.sendNotice("Usage: REVEAL <channel> [page]")
+			return
+		}
+
+		page := 1
+		if len(params) > 1 {
+			page, err = strconv.Atoi(params[1])
+			if err != nil || page < -1 || page == 0 {
+				cl.sendError("Unable to reveal, invalid page specified")
+				return
+			}
+		}
+
+		s.revealChannel(params[0], cl.identifier, page)
+	case COMMAND_KICK:
+		if len(params) == 0 {
+			cl.sendNotice("Usage: KICK <channel> <5 digit log number>")
+			return
+		}
+	case COMMAND_BAN:
+		if len(params) == 0 {
+			cl.sendNotice("Usage: BAN <channel> <5 digit log number> <duration>")
+			return
+		}
+	case COMMAND_KILL:
+		if len(params) == 0 {
+			cl.sendNotice("Usage: KILL <channel> <5 digit log number>")
+			return
+		}
+	case COMMAND_REHASH:
+		// TODO
+	case COMMAND_UPGRADE:
+		// TODO
+	}
+}
+
 func (s *Server) handlePrivmsg(channel string, client string, message string) {
-	if !s.inChannel(channel, client) {
+	cl := s.getClient(client)
+	if cl == nil {
+		return
+	}
+
+	if strings.ToLower(channel) == "anonirc" {
+		params := strings.Split(message, " ")
+		if len(params) > 0 && len(params[0]) > 0 {
+			var otherparams []string
+			if len(params) > 1 {
+				otherparams = params[1:]
+			}
+
+			s.handleUserCommand(client, params[0], otherparams)
+		}
+
+		return
+	} else if channel == "" || channel[0] != '#' {
+		return
+	} else if !s.inChannel(channel, client) {
 		return // Not in channel
 	}
 
 	ch := s.getChannel(channel)
-	cl := s.getClient(client)
-
-	if ch == nil || cl == nil {
+	if ch == nil {
 		return
 	}
 
@@ -508,7 +585,7 @@ func (s *Server) handleRead(c *Client) {
 			s.killClient(c)
 			return
 		}
-		if debugmode || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG) {
+		if verbose || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG) {
 			log.Printf("%s -> %s", c.identifier, msg)
 		}
 
@@ -537,6 +614,11 @@ func (s *Server) handleRead(c *Client) {
 			}
 
 			s.joinChannel("#", c.identifier)
+		} else if msg.Command == irc.PASS && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
+			// TODO: Add auth and multiple failed attempts ban
+			if msg.Params[0] == "admin" {
+				c.permission = PERMISSION_SUPERADMIN
+			}
 		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
 			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_LS, "userhost-in-names"}})
 		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ {
@@ -578,6 +660,8 @@ func (s *Server) handleRead(c *Client) {
 				c.write(&irc.Message{&anonirc, irc.RPL_AWAY, []string{whoisnick, easteregg}})
 				c.write(&irc.Message{&anonirc, irc.RPL_ENDOFWHOIS, []string{whoisnick, "End of /WHOIS list."}})
 			}()
+		} else if msg.Command == irc.ISON {
+			c.write(&irc.Message{&anonirc, irc.RPL_ISON, []string{""}})
 		} else if msg.Command == irc.AWAY {
 			if len(msg.Params) > 0 {
 				c.write(&irc.Message{&anonirc, irc.RPL_NOWAWAY, []string{"You have been marked as being away"}})
@@ -650,22 +734,8 @@ func (s *Server) handleRead(c *Client) {
 			}
 		} else if msg.Command == irc.QUIT {
 			s.killClient(c)
-		}
-
-		// TODO: Filter here for logged in user
-		if msg.Command == COMMAND_REVEAL && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
-			page := 1
-			if len(msg.Params) > 1 {
-				page, err = strconv.Atoi(msg.Params[1])
-				if err != nil || page < -1 || page == 0 {
-					c.sendError("Unable to reveal, invalid page specified")
-					return
-				}
-			}
-
-			s.revealChannel(msg.Params[0], c.identifier, page)
-		} else if msg.Command == irc.KICK && len(msg.Params) > 2 && len(msg.Params[0]) > 0 && len(msg.Params[1]) > 0 {
-			// TODO
+		} else {
+			s.handleUserCommand(c.identifier, msg.Command, msg.Params)
 		}
 	}
 }
@@ -687,7 +757,7 @@ func (s *Server) handleWrite(c *Client) {
 			msg.Params = append([]string{c.nick}, msg.Params...)
 		}
 
-		if debugmode || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG) {
+		if verbose || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG) {
 			log.Printf("%s <- %s", c.identifier, msg)
 		}
 		c.writer.Encode(msg)

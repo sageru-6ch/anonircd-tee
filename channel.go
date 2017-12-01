@@ -51,6 +51,7 @@ func (c *Channel) Log(client *Client, action string, message string) {
 	defer c.Unlock()
 
 	// TODO: Log size limiting, max capacity will be 998 entries
+	// Log hash of IP address which is used later when connecting/joining
 
 	c.logs = append(c.logs, &ChannelLog{Timestamp: time.Now().UTC().UnixNano(), Client: client.identifier, IP: client.ip, Action: action, Message: message})
 }
@@ -77,7 +78,7 @@ func (c *Channel) Reveal(page int) []string {
 	}
 
 	if len(ls) == 0 {
-		ls = append(ls, "No matching logs were returned")
+		ls = append(ls, "No log entries match criteria")
 	} else {
 		filterType := "all"
 		if page > -1 {
@@ -87,7 +88,7 @@ func (c *Channel) Reveal(page int) []string {
 
 		finishedMessage := fmt.Sprintf("Finished revealing %s", c.identifier)
 		if logsRemain {
-			finishedMessage = fmt.Sprintf("Additional logs on page %d", page+1)
+			finishedMessage = fmt.Sprintf("Additional log entries on page %d", page+1)
 		}
 		ls = append(ls, finishedMessage)
 	}
