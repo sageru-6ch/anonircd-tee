@@ -90,7 +90,7 @@ func main() {
 		syscall.SIGHUP)
 	go func() {
 		<-sighup
-		s.reload()
+		s.upgrade()
 	}()
 
 	s.odyssey, err = os.Open("ODYSSEY")
@@ -100,4 +100,5 @@ func main() {
 	defer s.odyssey.Close()
 
 	s.listen()
+	log.Println("Exiting...")
 }

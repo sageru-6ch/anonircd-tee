@@ -39,6 +39,7 @@ type Config struct {
 }
 
 type Server struct {
+	state        int
 	config       *Config
 	configfile   string
 	created      int64
@@ -56,6 +57,7 @@ type Server struct {
 
 func NewServer(configfile string) *Server {
 	s := &Server{}
+	s.state = ENTITY_STATE_NORMAL
 	s.config = &Config{}
 	s.configfile = configfile
 	s.created = time.Now().Unix()
@@ -488,6 +490,7 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 	command = strings.ToUpper(command)
 	switch command {
 	case COMMAND_HELP:
+		// TODO: Send admin commands to admins
 		cl.sendNotice("Available commands: REVEAL, KICK, BAN")
 		return
 	case COMMAND_REVEAL:
@@ -801,12 +804,17 @@ func (s *Server) killClient(c *Client) {
 
 func (s *Server) listenPlain() {
 	for {
+		if s.state == ENTITY_STATE_TERMINATING {
+			return
+		}
+
 		listen, err := net.Listen("tcp", ":6667")
 		if err != nil {
 			log.Printf("Failed to listen: %v", err)
 			time.Sleep(1 * time.Minute)
 			continue
 		}
+
 		log.Println("Listening on 6667")
 
 	accept:
@@ -829,6 +837,10 @@ func (s *Server) listenPlain() {
 
 func (s *Server) listenSSL() {
 	for {
+		if s.state == ENTITY_STATE_TERMINATING {
+			return
+		}
+
 		if s.config.SSLCert == "" {
 			time.Sleep(1 * time.Minute)
 			return // SSL is disabled
@@ -869,6 +881,10 @@ func (s *Server) listenSSL() {
 
 func (s *Server) pingClients() {
 	for {
+		if s.state == ENTITY_STATE_TERMINATING {
+			return
+		}
+
 		s.clients.Range(func(k, v interface{}) bool {
 			cl := v.(*Client)
 			if cl != nil {
@@ -918,6 +934,16 @@ func (s *Server) reload() {
 	s.loadConfig()
 	s.restartplain <- true
 	s.restartssl <- true
+}
+
+func (s *Server) upgrade() {
+	log.Println("Upgrading...")
+	s.restartplain <- true
+	s.restartssl <- true
+	log.Println("Upgrading...2")
+	s.restartplain <- true
+	s.restartssl <- true
+	log.Println("Upgrading...3")
 }
 
 func (s *Server) readOdyssey(line int) string {
