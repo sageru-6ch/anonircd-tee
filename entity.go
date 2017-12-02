@@ -94,8 +94,8 @@ func (e *Entity) diffModes(lastmodes map[string]string) (map[string]string, map[
 
 	removedmodes := make(map[string]string)
 	for mode := range lastmodes {
-		if m, ok := e.modes.Load(mode); ok {
-			removedmodes[mode] = m.(string)
+		if _, ok := e.modes.Load(mode); !ok {
+			removedmodes[mode] = mode
 		}
 	}
 

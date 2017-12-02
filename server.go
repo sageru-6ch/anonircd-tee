@@ -3,11 +3,11 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
-	"net/http"
 	"os"
 	"reflect"
 	"strconv"
@@ -15,19 +15,51 @@ import (
 	"sync"
 	"time"
 
+	"sort"
+
 	"github.com/BurntSushi/toml"
+	"github.com/pkg/errors"
+	"golang.org/x/crypto/sha3"
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
+const (
+	COMMAND_HELP = "HELP"
+	COMMAND_INFO = "INFO"
+
+	// User commands
+	COMMAND_REGISTER = "REGISTER"
+	COMMAND_IDENTIFY = "IDENTIFY"
+	COMMAND_USERNAME = "USERNAME"
+	COMMAND_PASSWORD = "PASSWORD"
+
+	// Channel/server commands
+	COMMAND_FOUND  = "FOUND"
+	COMMAND_GRANT  = "GRANT"
+	COMMAND_REVEAL = "REVEAL"
+	COMMAND_KICK   = "KICK"
+	COMMAND_BAN    = "BAN"
+
+	// Server admins only
+	COMMAND_KILL    = "KILL"
+	COMMAND_STATS   = "STATS"
+	COMMAND_REHASH  = "REHASH"
+	COMMAND_UPGRADE = "UPGRADE"
+)
+
 type Config struct {
-	SSLCert       string
-	SSLKey        string
-	ProfilingPort int
+	Salt     string
+	DBDriver string
+	DBSource string
+	SSLCert  string
+	SSLKey   string
 }
 
 type Server struct {
 	config       *Config
+	configfile   string
 	created      int64
+	db           *Database
 	clients      *sync.Map
 	channels     *sync.Map
 	odyssey      *os.File
@@ -39,10 +71,12 @@ type Server struct {
 	*sync.RWMutex
 }
 
-func NewServer() *Server {
+func NewServer(configfile string) *Server {
 	s := &Server{}
 	s.config = &Config{}
+	s.configfile = configfile
 	s.created = time.Now().Unix()
+	s.db = new(Database)
 	s.clients = new(sync.Map)
 	s.channels = new(sync.Map)
 	s.odysseymutex = new(sync.RWMutex)
@@ -54,8 +88,18 @@ func NewServer() *Server {
 	return s
 }
 
+func (s *Server) hashPassword(username string, password string) string {
+	sha512 := sha3.New512()
+	_, err := sha512.Write([]byte(strings.Join([]string{username, s.config.Salt, password}, "-")))
+	if err != nil {
+		return ""
+	}
+
+	return base64.URLEncoding.EncodeToString(sha512.Sum(nil))
+}
+
 func (s *Server) getAnonymousPrefix(i int) *irc.Prefix {
-	prefix := anonymous
+	prefix := prefixAnonymous
 	if i > 1 {
 		prefix.Name += fmt.Sprintf("%d", i)
 	}
@@ -75,7 +119,7 @@ func (s *Server) getChannels(client string) map[string]*Channel {
 	s.channels.Range(func(k, v interface{}) bool {
 		key := k.(string)
 		channel := v.(*Channel)
-		if s.inChannel(key, client) {
+		if client == "" || s.inChannel(key, client) {
 			channels[key] = channel
 		}
 
@@ -83,6 +127,16 @@ func (s *Server) getChannels(client string) map[string]*Channel {
 	})
 
 	return channels
+}
+
+func (s *Server) channelCount() int {
+	i := 0
+	s.channels.Range(func(k, v interface{}) bool {
+		i++
+		return true
+	})
+
+	return i
 }
 
 func (s *Server) getClient(client string) *Client {
@@ -97,16 +151,54 @@ func (s *Server) getClients(channel string) map[string]*Client {
 	clients := make(map[string]*Client)
 
 	ch := s.getChannel(channel)
+	if ch == nil {
+		return clients
+	}
 
 	ch.clients.Range(func(k, v interface{}) bool {
 		cl := s.getClient(k.(string))
-		if cl != nil {
+		if channel == "" || cl != nil {
 			clients[cl.identifier] = cl
 		}
 		return true
 	})
 
 	return clients
+}
+
+func (s *Server) clientCount() int {
+	i := 0
+	s.clients.Range(func(k, v interface{}) bool {
+		i++
+		return true
+	})
+
+	return i
+}
+
+func (s *Server) revealClient(channel string, identifier string) *Client {
+	if len(identifier) != 5 {
+		return nil
+	}
+
+	ch := s.getChannel(channel)
+	if ch == nil {
+		return nil
+	}
+
+	rip := ch.RevealHash(identifier)
+	if rip == "" {
+		return nil
+	}
+
+	cls := s.getClients(ch.identifier)
+	for _, rcl := range cls {
+		if rcl.ip == rip {
+			return rcl
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) inChannel(channel string, client string) bool {
@@ -124,13 +216,23 @@ func (s *Server) joinChannel(channel string, client string) {
 		return // Already in channel
 	}
 
-	ch := s.getChannel(channel)
 	cl := s.getClient(client)
-
 	if cl == nil {
 		return
 	}
 
+	if len(channel) == 0 {
+		return
+	} else if channel[0] == '&' {
+		if s.globalPermission(cl) == PERMISSION_USER {
+			cl.accessDenied()
+			return
+		}
+	} else if channel[0] != '#' {
+		return
+	}
+
+	ch := s.getChannel(channel)
 	if ch == nil {
 		ch = NewChannel(channel)
 		s.channels.Store(channel, ch)
@@ -139,11 +241,12 @@ func (s *Server) joinChannel(channel string, client string) {
 		return
 	}
 
-	ch.clients.Store(client, s.getClientCount(channel, client)+1)
+	ch.clients.Store(client, s.clientsInChannel(channel, client)+1)
 	cl.write(&irc.Message{cl.getPrefix(), irc.JOIN, []string{channel}})
+	ch.Log(cl, irc.JOIN, "")
 
 	s.sendNames(channel, client)
-	s.updateClientCount(channel, client)
+	s.updateClientCount(channel, client, "")
 	s.sendTopic(channel, client, false)
 }
 
@@ -156,14 +259,38 @@ func (s *Server) partChannel(channel string, client string, reason string) {
 	}
 
 	cl.write(&irc.Message{cl.getPrefix(), irc.PART, []string{channel, reason}})
+	ch.Log(cl, irc.PART, reason)
 	ch.clients.Delete(client)
 
-	s.updateClientCount(channel, client)
+	s.updateClientCount(channel, client, reason)
+	// TODO: Destroy empty channel
 }
 
-func (s *Server) partAllChannels(client string) {
+func (s *Server) partAllChannels(client string, reason string) {
 	for channelname := range s.getChannels(client) {
-		s.partChannel(channelname, client, "")
+		s.partChannel(channelname, client, reason)
+	}
+}
+
+func (s *Server) revealChannelLog(channel string, client string, page int) {
+	cl := s.getClient(client)
+	if cl == nil {
+		return
+	}
+
+	// TODO: Check channel permission
+	ch := s.getChannel(channel)
+	if ch == nil {
+		cl.sendError("Unable to reveal, invalid channel specified")
+		return
+	} else if !ch.HasClient(client) {
+		cl.sendError("Unable to reveal, you are not in that channel")
+		return
+	}
+
+	r := ch.RevealLog(page)
+	for _, rev := range r {
+		cl.sendMessage(rev)
 	}
 }
 
@@ -173,13 +300,13 @@ func (s *Server) enforceModes(channel string) {
 	if ch != nil && ch.hasMode("z") {
 		for client, cl := range s.getClients(channel) {
 			if !cl.ssl {
-				s.partChannel(channel, client, "Only SSL connections are allowed in this channel")
+				s.partChannel(channel, client, fmt.Sprintf("You must connect via SSL to join %s", channel))
 			}
 		}
 	}
 }
 
-func (s *Server) getClientCount(channel string, client string) int {
+func (s *Server) clientsInChannel(channel string, client string) int {
 	ch := s.getChannel(channel)
 	cl := s.getClient(client)
 
@@ -200,13 +327,14 @@ func (s *Server) getClientCount(channel string, client string) int {
 	return ccount
 }
 
-func (s *Server) updateClientCount(channel string, client string) {
+func (s *Server) updateClientCount(channel string, client string, reason string) {
 	ch := s.getChannel(channel)
 
 	if ch == nil {
 		return
 	}
 
+	var reasonShown bool
 	ch.clients.Range(func(k, v interface{}) bool {
 		cl := s.getClient(k.(string))
 		ccount := v.(int)
@@ -217,7 +345,8 @@ func (s *Server) updateClientCount(channel string, client string) {
 			return true
 		}
 
-		chancount := s.getClientCount(channel, cl.identifier)
+		reasonShown = false
+		chancount := s.clientsInChannel(channel, cl.identifier)
 
 		if ccount < chancount {
 			for i := ccount; i < chancount; i++ {
@@ -227,7 +356,13 @@ func (s *Server) updateClientCount(channel string, client string) {
 			ch.clients.Store(cl.identifier, chancount)
 		} else if ccount > chancount {
 			for i := ccount; i > chancount; i-- {
-				cl.write(&irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel}})
+				pr := ""
+				if !reasonShown {
+					pr = reason
+				}
+
+				cl.write(&irc.Message{s.getAnonymousPrefix(i - 1), irc.PART, []string{channel, pr}})
+				reasonShown = true
 			}
 		} else {
 			return true
@@ -240,32 +375,34 @@ func (s *Server) updateClientCount(channel string, client string) {
 }
 
 func (s *Server) sendNames(channel string, clientname string) {
-	if s.inChannel(channel, clientname) {
-		cl := s.getClient(clientname)
-
-		if cl == nil {
-			return
-		}
-
-		names := []string{}
-		if cl.capHostInNames {
-			names = append(names, cl.getPrefix().String())
-		} else {
-			names = append(names, cl.nick)
-		}
-
-		ccount := s.getClientCount(channel, clientname)
-		for i := 1; i < ccount; i++ {
-			if cl.capHostInNames {
-				names = append(names, s.getAnonymousPrefix(i).String())
-			} else {
-				names = append(names, s.getAnonymousPrefix(i).Name)
-			}
-		}
-
-		cl.write(&irc.Message{&anonirc, irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")}})
-		cl.write(&irc.Message{&anonirc, irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."}})
+	if !s.inChannel(channel, clientname) {
+		return
 	}
+
+	cl := s.getClient(clientname)
+
+	if cl == nil {
+		return
+	}
+
+	names := []string{}
+	if cl.capHostInNames {
+		names = append(names, cl.getPrefix().String())
+	} else {
+		names = append(names, cl.nick)
+	}
+
+	ccount := s.clientsInChannel(channel, clientname)
+	for i := 1; i < ccount; i++ {
+		if cl.capHostInNames {
+			names = append(names, s.getAnonymousPrefix(i).String())
+		} else {
+			names = append(names, s.getAnonymousPrefix(i).Name)
+		}
+	}
+
+	cl.writeMessage(irc.RPL_NAMREPLY, []string{"=", channel, strings.Join(names, " ")})
+	cl.writeMessage(irc.RPL_ENDOFNAMES, []string{channel, "End of /NAMES list."})
 }
 
 func (s *Server) sendTopic(channel string, client string, changed bool) {
@@ -280,16 +417,16 @@ func (s *Server) sendTopic(channel string, client string, changed bool) {
 		return
 	}
 
-	tprefix := anonymous
+	tprefix := prefixAnonymous
 	tcommand := irc.TOPIC
 	if !changed {
-		tprefix = anonirc
+		tprefix = prefixAnonIRC
 		tcommand = irc.RPL_TOPIC
 	}
 	cl.write(&irc.Message{&tprefix, tcommand, []string{channel, ch.topic}})
 
 	if !changed {
-		cl.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, anonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil})
+		cl.writeMessage(strings.Join([]string{irc.RPL_TOPICWHOTIME, cl.nick, channel, prefixAnonymous.Name, fmt.Sprintf("%d", ch.topictime)}, " "), nil)
 	}
 }
 
@@ -306,6 +443,14 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 		return
 	}
 
+	chp, err := s.db.GetPermission(cl.account, channel)
+	if err != nil {
+		panic(err)
+	} else if ch.hasMode("t") && (cl.account == 0 || chp == PERMISSION_USER) {
+		cl.accessDenied()
+		return
+	}
+
 	ch.topic = topic
 	ch.topictime = time.Now().Unix()
 
@@ -313,15 +458,21 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 		s.sendTopic(channel, k.(string), true)
 		return true
 	})
+	ch.Log(cl, irc.TOPIC, ch.topic)
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
+	// TODO: irssi sends mode <channel> b, send response
 	if len(params) == 0 || len(params[0]) == 0 {
 		c.sendNotice("Invalid use of MODE")
 		return
 	}
 
-	if params[0][0] == '#' {
+	if c == nil {
+		return
+	}
+
+	if validChannelPrefix(params[0]) {
 		ch := s.getChannel(params[0])
 
 		if ch == nil {
@@ -329,11 +480,17 @@ func (s *Server) handleMode(c *Client, params []string) {
 		}
 
 		if len(params) == 1 || params[1] == "" {
-			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], ch.printModes(ch.getModes(), nil)}, " "), []string{}})
+			c.writeMessage(strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], ch.printModes(ch.getModes(), nil)}, " "), []string{})
 
 			// Send channel creation time
-			c.write(&irc.Message{&anonirc, strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{}})
+			c.writeMessage(strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{})
 		} else if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
+			if !s.hasPermission(c, irc.MODE, params[0]) {
+				// TODO: Send proper mode denied message
+				c.accessDenied()
+				return
+			}
+
 			lastmodes := make(map[string]string)
 			for m, mv := range ch.getModes() {
 				lastmodes[m] = mv
@@ -368,20 +525,20 @@ func (s *Server) handleMode(c *Client, params []string) {
 				ch.clients.Range(func(k, v interface{}) bool {
 					cl := s.getClient(k.(string))
 					if cl != nil {
-						cl.write(&irc.Message{&anonymous, irc.MODE, []string{params[0], ch.printModes(addedmodes, removedmodes)}})
+						cl.write(&irc.Message{&prefixAnonymous, irc.MODE, []string{params[0], ch.printModes(addedmodes, removedmodes)}})
 					}
 
 					return true
 				})
 
 				if resendusercount {
-					s.updateClientCount(params[0], c.identifier)
+					s.updateClientCount(params[0], c.identifier, "Enforcing MODEs")
 				}
 			}
 		}
 	} else {
 		if len(params) == 1 || params[1] == "" {
-			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(c.getModes(), nil)}, " "), []string{}})
+			c.writeMessage(strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(c.getModes(), nil)}, " "), []string{})
 			return
 		}
 
@@ -413,43 +570,465 @@ func (s *Server) handleMode(c *Client, params []string) {
 				addedmodes = c.getModes()
 			}
 
-			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(addedmodes, removedmodes)}})
+			c.writeMessage(strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(addedmodes, removedmodes)})
 
 			if resendusercount {
 				for ch := range s.getChannels(c.identifier) {
-					s.updateClientCount(ch, c.identifier)
+					s.updateClientCount(ch, c.identifier, "Enforcing MODEs")
 				}
 			}
 		}
 	}
 }
 
+func (s *Server) buildUsage(cl *Client, command string) map[string][]string {
+	helpDuration := "Duration can be 0 to never expire, or e.g. 30m, 1h, 2d, 3w"
+
+	var commandUsage = map[string][]string{
+		COMMAND_HELP: {"[command]",
+			"Print info regarding all commands or a specific command"},
+		COMMAND_INFO: {"[channel]",
+			"Print info such as whether a channel is registered",
+			"If channel is omitted, server info is printed instead"},
+		COMMAND_REGISTER: {"<username> <password>",
+			"Create an account, allowing you to found channels and moderate existing channels (with permission)",
+			"See IDENTIFY"},
+		COMMAND_IDENTIFY: {"[username] <password>",
+			"Identify to a previously registered account",
+			"If username is omitted, it will be replaced with your current nick",
+			"Note that you may identify when connecting by sending the following server password:",
+			"Your username and password:  <username>:<password>",
+			"Or your username and token:  <username>:<token>",
+			"E.g.  admin:hunter2"},
+		COMMAND_USERNAME: {"<username> <password> <new username> <confirm new username>",
+			"Change your username"},
+		COMMAND_PASSWORD: {"<username> <password> <new password> <confirm new password>",
+			"Change your password"},
+		COMMAND_FOUND: {"<channel>",
+			"Register a channel"},
+		COMMAND_REVEAL: {"<channel> [page]",
+			"Print channel log, allowing KICK/BAN to be used",
+			fmt.Sprintf("Results start at page 1, %d per page", CHANNEL_LOGS_PER_PAGE),
+			"All log entries are returned when viewing page -1"},
+		COMMAND_KICK: {"<channel> <5 digit log number> [reason]",
+			"Kick a user from a channel"},
+		COMMAND_BAN: {"<channel> <5 digit log number> <duration> [reason]",
+			"Kick and ban a user from a channel",
+			helpDuration},
+		COMMAND_KILL: {"<channel> <5 digit log number> <duration> [reason]",
+			"Disconnect and ban a user from the server",
+			helpDuration},
+		COMMAND_STATS: {"",
+			"Print the current number of clients and channels"},
+		COMMAND_REHASH: {"",
+			"Reload the server configuration"},
+		COMMAND_UPGRADE: {"",
+			"Upgrade the server without disconnecting clients"},
+	}
+
+	u := map[string][]string{}
+	command = strings.ToUpper(command)
+	for cmd, usage := range commandUsage {
+		if command == COMMAND_HELP || cmd == command {
+			if s.hasPermission(cl, cmd, "") {
+				u[cmd] = usage
+			}
+		}
+	}
+
+	return u
+}
+
+func (s *Server) sendUsage(cl *Client, command string) {
+	u := s.buildUsage(cl, command)
+
+	commands := make([]string, 0, len(u))
+	for cmd := range u {
+		commands = append(commands, cmd)
+	}
+	sort.Strings(commands)
+
+	var usage []string
+	for _, cmd := range commands {
+		usage = u[cmd]
+
+		cl.sendMessage(cmd + " " + usage[0])
+		for _, ul := range usage[1:] {
+			cl.sendMessage("  " + ul)
+		}
+	}
+
+}
+
+func (s *Server) handleUserCommand(client string, command string, params []string) {
+	cl := s.getClient(client)
+	if cl == nil {
+		return
+	}
+
+	var err error
+	command = strings.ToUpper(command)
+	switch command {
+	case COMMAND_HELP:
+		cmd := command
+		if len(params) > 0 {
+			cmd = params[0]
+		}
+		s.sendUsage(cl, cmd)
+		return
+	case COMMAND_INFO:
+		cl.sendMessage("AnonIRCd https://github.com/sageru-6ch/anonircd")
+		return
+	case COMMAND_REGISTER:
+		if len(params) == 0 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		// TODO: Only alphanumeric username
+	case COMMAND_IDENTIFY:
+		if len(params) == 0 || len(params) > 2 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		username := cl.nick
+		password := params[0]
+		if len(params) == 2 {
+			username = params[0]
+			password = params[1]
+		}
+
+		authSuccess := s.identify(cl, username, password)
+		if authSuccess {
+			cl.sendNotice("Identified successfully")
+
+			if s.globalPermission(cl) != PERMISSION_USER {
+				s.joinChannel("&", cl.identifier)
+			}
+		} else {
+			cl.sendNotice("Failed to identify, incorrect username/password")
+		}
+	case COMMAND_USERNAME:
+		if cl.account == 0 {
+			cl.sendError("You must identify before using that command")
+		}
+
+		if len(params) == 0 || len(params) > 4 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		if params[2] != params[3] {
+			cl.sendError("Unable to change username, new usernames don't match")
+			return
+		}
+		// TODO: Alphanumeric username
+
+		accid, err := s.db.Auth(params[0], params[1])
+		if err != nil {
+			panic(err)
+		}
+
+		if accid == 0 {
+			cl.sendError("Unable to change username, incorrect username/password supplied")
+			return
+		}
+
+		err = s.db.SetUsername(accid, params[2], params[1])
+		if err != nil {
+			panic(err)
+		}
+		cl.sendMessage("Username changed successfully")
+	case COMMAND_PASSWORD:
+		if cl.account == 0 {
+			cl.sendError("You must identify before using that command")
+		}
+
+		if len(params) == 0 || len(params) > 4 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		if params[2] != params[3] {
+			cl.sendError("Unable to change password, new passwords don't match")
+			return
+		}
+
+		accid, err := s.db.Auth(params[0], params[1])
+		if err != nil {
+			panic(err)
+		}
+
+		if accid == 0 {
+			cl.sendError("Unable to change password, incorrect username/password supplied")
+			return
+		}
+
+		err = s.db.SetPassword(accid, params[0], params[2])
+		if err != nil {
+			panic(err)
+		}
+		cl.sendMessage("Password changed successfully")
+	case COMMAND_REVEAL:
+		// TODO: &#chan shows moderator audit log, & alone shows server admin audit log
+		if len(params) == 0 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		ch := s.getChannel(params[0])
+		if ch == nil {
+			cl.sendError("Unable to reveal, invalid channel specified")
+			return
+		}
+
+		if !s.hasPermission(cl, COMMAND_REVEAL, params[0]) {
+			cl.accessDenied()
+			return
+		}
+
+		page := 1
+		if len(params) > 1 {
+			page, err = strconv.Atoi(params[1])
+			if err != nil || page < -1 || page == 0 {
+				cl.sendError("Unable to reveal, invalid page specified")
+				return
+			}
+		}
+
+		s.revealChannelLog(params[0], cl.identifier, page)
+	case COMMAND_KICK:
+		if len(params) < 2 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		ch := s.getChannel(params[0])
+		if ch == nil {
+			cl.sendError("Unable to kick, invalid channel specified")
+			return
+		}
+
+		if !s.hasPermission(cl, COMMAND_KICK, params[0]) {
+			cl.accessDenied()
+			return
+		}
+
+		rcl := s.revealClient(params[0], params[1])
+		if rcl == nil {
+			cl.sendError("Unable to kick, client not found or no longer connected")
+			return
+		}
+
+		reason := "Kicked"
+		if len(params) > 2 {
+			reason = fmt.Sprintf("%s: %s", reason, strings.Join(params[2:], " "))
+		}
+		s.partChannel(ch.identifier, rcl.identifier, reason)
+		cl.sendMessage(fmt.Sprintf("Kicked %s %s", params[0], params[1]))
+	case COMMAND_BAN:
+		if len(params) < 3 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		ch := s.getChannel(params[0])
+		if ch == nil {
+			cl.sendError("Unable to ban, invalid channel specified")
+			return
+		}
+
+		if !s.hasPermission(cl, COMMAND_BAN, params[0]) {
+			cl.accessDenied()
+			return
+		}
+
+		rcl := s.revealClient(params[0], params[1])
+		if rcl == nil {
+			cl.sendError("Unable to ban, client not found or no longer connected")
+			return
+		}
+
+		reason := "Banned"
+		if len(params) > 3 {
+			reason = fmt.Sprintf("%s: %s", reason, strings.Join(params[3:], " "))
+		}
+		// TODO: Apply ban in DB
+		s.partChannel(ch.identifier, rcl.identifier, reason)
+		cl.sendMessage(fmt.Sprintf("Banned %s %s", params[0], params[1]))
+	case COMMAND_KILL:
+		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
+			cl.accessDenied()
+			return
+		}
+
+		if len(params) < 3 {
+			s.sendUsage(cl, command)
+			return
+		}
+
+		rcl := s.revealClient(params[0], params[1])
+		if rcl == nil {
+			cl.sendError("Unable to kill, client not found or no longer connected")
+			return
+		}
+
+		reason := "Killed"
+		if len(params) > 3 {
+			reason = fmt.Sprintf("%s: %s", reason, strings.Join(params[3:], " "))
+		}
+		s.partAllChannels(rcl.identifier, reason)
+		s.killClient(rcl)
+		cl.sendMessage(fmt.Sprintf("Killed %s %s", params[0], params[1]))
+	case COMMAND_STATS:
+		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
+			cl.accessDenied()
+			return
+		}
+
+		cl.sendMessage(fmt.Sprintf("%d clients in %d channels", s.clientCount(), s.channelCount()))
+	case COMMAND_REHASH:
+		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
+			cl.accessDenied()
+			return
+		}
+
+		err := s.reload()
+		if err != nil {
+			cl.sendError(err.Error())
+		} else {
+			cl.sendMessage("Reloaded configuration")
+		}
+	case COMMAND_UPGRADE:
+		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
+			cl.accessDenied()
+			return
+		}
+
+		// TODO
+	}
+}
+
 func (s *Server) handlePrivmsg(channel string, client string, message string) {
-	if !s.inChannel(channel, client) {
+	cl := s.getClient(client)
+	if cl == nil {
+		return
+	}
+
+	if strings.ToLower(channel) == "anonirc" {
+		params := strings.Split(message, " ")
+		if len(params) > 0 && len(params[0]) > 0 {
+			var otherparams []string
+			if len(params) > 1 {
+				otherparams = params[1:]
+			}
+
+			s.handleUserCommand(client, params[0], otherparams)
+		}
+
+		return
+	} else if channel == "" || !validChannelPrefix(channel) {
+		return
+	} else if !s.inChannel(channel, client) {
 		return // Not in channel
 	}
 
 	ch := s.getChannel(channel)
-
 	if ch == nil {
 		return
 	}
 
-	s.updateClientCount(channel, "")
+	s.updateClientCount(channel, "", "")
 
 	ch.clients.Range(func(k, v interface{}) bool {
-		cl := s.getClient(k.(string))
-		if cl != nil && cl.identifier != client {
-			cl.write(&irc.Message{&anonymous, irc.PRIVMSG, []string{channel, message}})
+		chcl := s.getClient(k.(string))
+		if chcl != nil && chcl.identifier != client {
+			chcl.write(&irc.Message{&prefixAnonymous, irc.PRIVMSG, []string{channel, message}})
 		}
 
 		return true
 	})
+	ch.Log(cl, "CHAT", message)
+}
+
+func (s *Server) identify(c *Client, username string, password string) bool {
+	accountid, err := s.db.Auth(username, password)
+	if err != nil {
+		panic(err)
+	}
+
+	var account *DBAccount
+	if accountid > 0 {
+		account, err = s.db.Account(accountid)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	if account == nil {
+		return false
+	}
+
+	c.account = accountid
+	return true
+}
+
+func (s *Server) globalPermission(c *Client) int {
+	globalPermission := PERMISSION_USER
+	if c.account > 0 {
+		gp, err := s.db.GetPermission(c.account, "&")
+		if err != nil {
+			panic(err)
+		}
+		globalPermission = gp
+	}
+
+	return globalPermission
+}
+
+func (s *Server) hasPermission(c *Client, command string, channel string) bool {
+	globalPermission := s.globalPermission(c)
+	if globalPermission == PERMISSION_SUPERADMIN {
+		return true
+	}
+
+	chp := PERMISSION_USER
+	var err error
+	if channel != "" {
+		chp, err = s.db.GetPermission(c.account, channel)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	command = strings.ToUpper(command)
+	if command == COMMAND_HELP || command == COMMAND_INFO || command == COMMAND_REGISTER || command == COMMAND_IDENTIFY {
+		return true
+	} else if command == COMMAND_USERNAME || command == COMMAND_PASSWORD || command == COMMAND_FOUND || command == COMMAND_GRANT || command == COMMAND_KICK || command == COMMAND_BAN || command == irc.MODE {
+		if !c.registered() {
+			return false
+		} else if channel == "" {
+			return true
+		}
+
+		if command == COMMAND_GRANT {
+			return chp == PERMISSION_SUPERADMIN
+		} else if command == COMMAND_KICK || command == COMMAND_BAN || command == irc.MODE {
+			return chp == PERMISSION_SUPERADMIN || chp == PERMISSION_ADMIN || chp == PERMISSION_MODERATOR
+		}
+	}
+
+	return false
 }
 
 func (s *Server) handleRead(c *Client) {
 	for {
-		c.conn.SetDeadline(time.Now().Add(300 * time.Second))
+		if c.state == ENTITY_STATE_TERMINATING {
+			return
+		}
+
+		c.conn.SetReadDeadline(time.Now().Add(300 * time.Second))
 
 		if _, ok := s.clients.Load(c.identifier); !ok {
 			s.killClient(c)
@@ -458,37 +1037,24 @@ func (s *Server) handleRead(c *Client) {
 
 		msg, err := c.reader.Decode()
 		if msg == nil || err != nil {
+			// Error decoding message, client probably disconnected
 			s.killClient(c)
 			return
 		}
-		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
-			log.Println(c.identifier, "<-", msg.String())
+		if debugMode && (verbose || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
+			log.Printf("%s -> %s", c.identifier, msg)
 		}
-		if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
-			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], "userhost-in-names"}})
-		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ {
-			if strings.Contains(msg.Trailing(), "userhost-in-names") {
-				c.capHostInNames = true
-			}
-			c.write(&irc.Message{&anonirc, irc.CAP, []string{irc.CAP_ACK, msg.Trailing()}})
-		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LIST {
-			caps := []string{}
-			if c.capHostInNames {
-				caps = append(caps, "userhost-in-names")
-			}
-			c.write(&irc.Message{&anonirc, irc.CAP, []string{msg.Params[0], strings.Join(caps, " ")}})
-		} else if msg.Command == irc.PING {
-			c.write(&irc.Message{&anonirc, irc.PONG + " AnonIRC", []string{msg.Trailing()}})
-		} else if msg.Command == irc.NICK && c.nick == "*" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] != "" && msg.Params[0] != "*" {
+
+		if msg.Command == irc.NICK && c.nick == "*" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] != "" && msg.Params[0] != "*" {
 			c.nick = strings.Trim(msg.Params[0], "\"")
 		} else if msg.Command == irc.USER && c.user == "" && len(msg.Params) >= 3 && msg.Params[0] != "" && msg.Params[2] != "" {
 			c.user = strings.Trim(msg.Params[0], "\"")
 			c.host = strings.Trim(msg.Params[2], "\"")
 
-			c.write(&irc.Message{&anonirc, irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()}})
-			c.write(&irc.Message{&anonirc, irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd https://github.com/sageru-6ch/anonircd"}})
-			c.write(&irc.Message{&anonirc, irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())}})
-			c.write(&irc.Message{&anonirc, strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC", "AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{}})
+			c.writeMessage(irc.RPL_WELCOME, []string{"Welcome to AnonIRC " + c.getPrefix().String()})
+			c.writeMessage(irc.RPL_YOURHOST, []string{"Your host is AnonIRC, running version AnonIRCd https://github.com/sageru-6ch/anonircd"})
+			c.writeMessage(irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())})
+			c.writeMessage(strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC", "AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{})
 
 			motdsplit := strings.Split(motd, "\n")
 			for i, motdmsg := range motdsplit {
@@ -500,21 +1066,53 @@ func (s *Server) handleRead(c *Client) {
 				} else {
 					motdcode = irc.RPL_ENDOFMOTD
 				}
-				c.write(&irc.Message{&anonirc, motdcode, []string{"  " + motdmsg}})
+				c.writeMessage(motdcode, []string{"  " + motdmsg})
 			}
 
 			s.joinChannel("#", c.identifier)
-		} else if msg.Command == irc.WHOIS && len(msg.Params) > 0 && len(msg.Params[0]) >= len(anonymous.Name) && strings.ToLower(msg.Params[0][:len(anonymous.Name)]) == strings.ToLower(anonymous.Name) {
+			if s.globalPermission(c) != PERMISSION_USER {
+				s.joinChannel("&", c.identifier)
+			}
+		} else if msg.Command == irc.PASS && c.user == "" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
+			// TODO: Add auth and multiple failed attempts ban
+			authSuccess := false
+			psplit := strings.SplitN(msg.Params[0], ":", 2)
+			if len(psplit) == 2 {
+				authSuccess = s.identify(c, psplit[0], psplit[1])
+			}
+
+			if !authSuccess {
+				c.sendPasswordIncorrect()
+				s.killClient(c)
+			}
+		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LS {
+			c.writeMessage(irc.CAP, []string{irc.CAP_LS, "userhost-in-names"})
+		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_REQ {
+			if strings.Contains(msg.Trailing(), "userhost-in-names") {
+				c.capHostInNames = true
+			}
+			c.writeMessage(irc.CAP, []string{irc.CAP_ACK, msg.Trailing()})
+		} else if msg.Command == irc.CAP && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0] == irc.CAP_LIST {
+			caps := []string{}
+			if c.capHostInNames {
+				caps = append(caps, "userhost-in-names")
+			}
+			c.writeMessage(irc.CAP, []string{irc.CAP_LIST, strings.Join(caps, " ")})
+		} else if msg.Command == irc.PING {
+			c.writeMessage(irc.PONG+" AnonIRC", []string{msg.Trailing()})
+		} else if c.user == "" {
+			return // Client must send USER before issuing remaining commands
+		} else if msg.Command == irc.WHOIS && len(msg.Params) > 0 && len(msg.Params[0]) >= len(prefixAnonymous.Name) && strings.ToLower(msg.Params[0][:len(prefixAnonymous.Name)]) == strings.ToLower(prefixAnonymous.Name) {
 			go func() {
 				whoisindex := 1
-				if len(msg.Params[0]) > len(anonymous.Name) {
-					whoisindex, err = strconv.Atoi(msg.Params[0][len(anonymous.Name):])
+				if len(msg.Params[0]) > len(prefixAnonymous.Name) {
+					whoisindex, err = strconv.Atoi(msg.Params[0][len(prefixAnonymous.Name):])
 					if err != nil || whoisindex <= 1 {
 						return
 					}
 				}
 
-				whoisnick := anonymous.Name
+				whoisnick := prefixAnonymous.Name
 				if whoisindex > 1 {
 					whoisnick += strconv.Itoa(whoisindex)
 				}
@@ -524,14 +1122,16 @@ func (s *Server) handleRead(c *Client) {
 					easteregg = "I am the owner of my actions, heir of my actions, actions are the womb (from which I have sprung), actions are my relations, actions are my protection. Whatever actions I do, good or bad, of these I shall become the heir."
 				}
 
-				c.write(&irc.Message{&anonirc, irc.RPL_AWAY, []string{whoisnick, easteregg}})
-				c.write(&irc.Message{&anonirc, irc.RPL_ENDOFWHOIS, []string{whoisnick, "End of /WHOIS list."}})
+				c.writeMessage(irc.RPL_AWAY, []string{whoisnick, easteregg})
+				c.writeMessage(irc.RPL_ENDOFWHOIS, []string{whoisnick, "End of /WHOIS list."})
 			}()
+		} else if msg.Command == irc.ISON {
+			c.writeMessage(irc.RPL_ISON, []string{""})
 		} else if msg.Command == irc.AWAY {
 			if len(msg.Params) > 0 {
-				c.write(&irc.Message{&anonirc, irc.RPL_NOWAWAY, []string{"You have been marked as being away"}})
+				c.writeMessage(irc.RPL_NOWAWAY, []string{"You have been marked as being away"})
 			} else {
-				c.write(&irc.Message{&anonirc, irc.RPL_UNAWAY, []string{"You are no longer marked as being away"}})
+				c.writeMessage(irc.RPL_UNAWAY, []string{"You are no longer marked as being away"})
 			}
 		} else if msg.Command == irc.LIST {
 			chans := make(map[string]int)
@@ -540,32 +1140,32 @@ func (s *Server) handleRead(c *Client) {
 				ch := v.(*Channel)
 
 				if ch != nil && !ch.hasMode("p") && !ch.hasMode("s") {
-					chans[key] = s.getClientCount(key, c.identifier)
+					chans[key] = s.clientsInChannel(key, c.identifier)
 				}
 
 				return true
 			})
 
-			c.write(&irc.Message{&anonirc, irc.RPL_LISTSTART, []string{"Channel", "Users Name"}})
+			c.writeMessage(irc.RPL_LISTSTART, []string{"Channel", "Users Name"})
 			for _, pl := range sortMapByValues(chans) {
 				ch := s.getChannel(pl.Key)
 
-				c.write(&irc.Message{&anonirc, irc.RPL_LIST, []string{pl.Key, strconv.Itoa(pl.Value), "[" + ch.printModes(ch.getModes(), nil) + "] " + ch.topic}})
+				c.writeMessage(irc.RPL_LIST, []string{pl.Key, strconv.Itoa(pl.Value), "[" + ch.printModes(ch.getModes(), nil) + "] " + ch.topic})
 			}
-			c.write(&irc.Message{&anonirc, irc.RPL_LISTEND, []string{"End of /LIST"}})
-		} else if msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
+			c.writeMessage(irc.RPL_LISTEND, []string{"End of /LIST"})
+		} else if msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				s.joinChannel(channel, c.identifier)
 			}
-		} else if msg.Command == irc.NAMES && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
+		} else if msg.Command == irc.NAMES && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				s.sendNames(channel, c.identifier)
 			}
-		} else if msg.Command == irc.WHO && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
+		} else if msg.Command == irc.WHO && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			var ccount int
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				if s.inChannel(channel, c.identifier) {
-					ccount = s.getClientCount(channel, c.identifier)
+					ccount = s.clientsInChannel(channel, c.identifier)
 					for i := 0; i < ccount; i++ {
 						var prfx *irc.Prefix
 						if i == 0 {
@@ -574,14 +1174,14 @@ func (s *Server) handleRead(c *Client) {
 							prfx = s.getAnonymousPrefix(i)
 						}
 
-						c.write(&irc.Message{&anonirc, irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 " + anonymous.Name}})
+						c.writeMessage(irc.RPL_WHOREPLY, []string{channel, prfx.User, prfx.Host, "AnonIRC", prfx.Name, "H", "0 " + prefixAnonymous.Name})
 					}
-					c.write(&irc.Message{&anonirc, irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."}})
+					c.writeMessage(irc.RPL_ENDOFWHO, []string{channel, "End of /WHO list."})
 				}
 			}
 		} else if msg.Command == irc.MODE {
-			if len(msg.Params) == 2 && msg.Params[0][0] == '#' && msg.Params[1] == "b" {
-				c.write(&irc.Message{&anonirc, irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"}})
+			if len(msg.Params) == 2 && validChannelPrefix(msg.Params[0]) && msg.Params[1] == "b" {
+				c.writeMessage(irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"})
 			} else {
 				s.handleMode(c, msg.Params)
 			}
@@ -593,37 +1193,47 @@ func (s *Server) handleRead(c *Client) {
 			}
 		} else if msg.Command == irc.PRIVMSG && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			s.handlePrivmsg(msg.Params[0], c.identifier, msg.Trailing())
-		} else if msg.Command == irc.PART && len(msg.Params) > 0 && len(msg.Params[0]) > 0 && msg.Params[0][0] == '#' {
+		} else if msg.Command == irc.PART && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				s.partChannel(channel, c.identifier, "")
 			}
 		} else if msg.Command == irc.QUIT {
 			s.killClient(c)
+		} else {
+			s.handleUserCommand(c.identifier, msg.Command, msg.Params)
 		}
 	}
 }
 
 func (s *Server) handleWrite(c *Client) {
-	for msg := range c.writebuffer {
-		if msg == nil {
+	for {
+		select {
+		case msg := <-c.writebuffer:
+			if c.state == ENTITY_STATE_TERMINATING {
+				continue
+			}
+
+			c.wg.Add(1)
+			addnick := false
+			if _, err := strconv.Atoi(msg.Command); err == nil {
+				addnick = true
+			} else if msg.Command == irc.CAP {
+				addnick = true
+			}
+
+			if addnick {
+				msg.Params = append([]string{c.nick}, msg.Params...)
+			}
+
+			if debugMode && (verbose || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
+				log.Printf("%s <- %s", c.identifier, msg)
+			}
+			c.writer.Encode(msg)
+			c.wg.Done()
+		case <-c.terminate:
+			close(c.writebuffer)
 			return
 		}
-
-		addnick := false
-		if _, err := strconv.Atoi(msg.Command); err == nil {
-			addnick = true
-		} else if msg.Command == irc.CAP {
-			addnick = true
-		}
-
-		if addnick {
-			msg.Params = append([]string{c.nick}, msg.Params...)
-		}
-
-		if len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG {
-			log.Println(c.identifier, "->", msg)
-		}
-		c.writer.Encode(msg)
 	}
 }
 
@@ -639,26 +1249,31 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	}
 
 	client := NewClient(identifier, conn, ssl)
+	if client == nil {
+		return // Banned
+	}
 	s.clients.Store(client.identifier, client)
 
 	go s.handleWrite(client)
 	s.handleRead(client) // Block until the connection is closed
 
 	s.killClient(client)
-	close(client.writebuffer)
-	s.clients.Delete(identifier)
+	client.conn.Close()
 }
 
 func (s *Server) killClient(c *Client) {
-	if c.state == ENTITY_STATE_TERMINATING {
+	if c == nil || c.state == ENTITY_STATE_TERMINATING {
 		return
 	}
 	c.state = ENTITY_STATE_TERMINATING
 
-	c.write(nil)
-	c.conn.Close()
-	if _, ok := s.clients.Load(c.identifier); ok {
-		s.partAllChannels(c.identifier)
+	select {
+	case c.terminate <- true:
+		if _, ok := s.clients.Load(c.identifier); ok {
+			s.partAllChannels(c.identifier, "")
+		}
+		c.wg.Wait()
+	default:
 	}
 }
 
@@ -744,19 +1359,64 @@ func (s *Server) pingClients() {
 	}
 }
 
-func (s *Server) loadConfig() {
-	if _, err := os.Stat("anonircd.conf"); err == nil {
-		if _, err := toml.DecodeFile("anonircd.conf", &s.config); err != nil {
-			log.Fatalf("Failed to read anonircd.conf: %v", err)
-		}
+func (s *Server) connectDatabase() {
+	err := s.db.Connect(s.config.DBDriver, s.config.DBSource)
+	if err != nil {
+		panic(err)
 	}
 }
 
-func (s *Server) reload() {
-	log.Println("Reloading configuration")
-	s.loadConfig()
+func (s *Server) closeDatabase() {
+	err := s.db.Close()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (s *Server) loadConfig() error {
+	if s.configfile == "" {
+		return errors.New("configuration file must be specified:  anonircd -c /home/user/anonircd/anonircd.conf")
+	}
+
+	if _, err := os.Stat(s.configfile); err != nil {
+		return errors.New("unable to find configuration file " + s.configfile)
+	}
+
+	oldconfig := &*s.config
+
+	if _, err := toml.DecodeFile(s.configfile, &s.config); err != nil {
+		if oldconfig != nil {
+			s.config = oldconfig
+		}
+
+		return errors.New(fmt.Sprintf("Failed to read configuration file %s: %v", s.configfile, err))
+	}
+
+	if s.config.DBDriver == "" || s.config.DBSource == "" {
+		if oldconfig != nil {
+			s.config = oldconfig
+		}
+
+		return errors.New(fmt.Sprintf("DBDriver and DBSource must be configured in %s\nExample:\n\nDBDriver=\"sqlite3\"\nDBSource=\"/home/user/anonircd/anonircd.db\"", s.configfile))
+	}
+
+	return nil
+}
+
+func (s *Server) reload() error {
+	log.Println("Reloading configuration...")
+
+	err := s.loadConfig()
+	if err != nil {
+		log.Println("Failed to reload configuration")
+		return errors.Wrap(err, "failed to reload configuration")
+	}
+	log.Println("Reloaded configuration")
+
 	s.restartplain <- true
 	s.restartssl <- true
+
+	return nil
 }
 
 func (s *Server) readOdyssey(line int) string {
@@ -781,12 +1441,6 @@ func (s *Server) readOdyssey(line int) string {
 
 	s.odyssey.Seek(0, 0)
 	return ""
-}
-
-func (s *Server) startProfiling() {
-	if s.config.ProfilingPort > 0 {
-		http.ListenAndServe(fmt.Sprintf("localhost:%d", s.config.ProfilingPort), nil)
-	}
 }
 
 func (s *Server) listen() {
