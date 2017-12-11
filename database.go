@@ -1,21 +1,23 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
 	"github.com/gorilla/securecookie"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/pkg/errors"
 )
 
 const DATABASE_VERSION = 1
 
-var ErrAccountExists = errors.New("account exists")
-var ErrChannelExists = errors.New("channel exists")
+var ErrAccountExists = errors.New("account already exists")
+var ErrChannelExists = errors.New("channel already exists")
+var ErrChannelDoesNotExist = errors.New("channel does not exist")
 
 var tables = map[string][]string{
 	"meta": {
@@ -41,10 +43,15 @@ var tables = map[string][]string{
 		"`expires` INTEGER NULL",
 		"`reason` TEXT NULL"}}
 
+const (
+	BAN_TYPE_ADDRESS = 1
+	BAN_TYPE_ACCOUNT = 2
+)
+
 type DBAccount struct {
-	ID         int
-	Username   string
-	Permission int
+	ID       int
+	Username string
+	Password string
 }
 
 type DBChannel struct {
@@ -60,6 +67,12 @@ type DBPermission struct {
 	Permission int
 }
 
+type DBMode struct {
+	Channel string
+	Mode    string
+	Value   string
+}
+
 type DBBan struct {
 	Channel string
 	Type    int
@@ -69,12 +82,12 @@ type DBBan struct {
 }
 
 type Database struct {
-	db *sql.DB
+	db *sqlx.DB
 }
 
 func (d *Database) Connect(driver string, dataSource string) error {
 	var err error
-	d.db, err = sql.Open(driver, dataSource)
+	d.db, err = sqlx.Connect(driver, dataSource)
 	if err != nil {
 		return errors.Wrapf(err, "failed to connect to %s database", driver)
 	}
@@ -110,7 +123,7 @@ func (d *Database) CreateTables() error {
 
 func (d *Database) Migrate() error {
 	rows, err := d.db.Query("SELECT `value` FROM meta WHERE `key`=? LIMIT 1", "version")
-	if err != nil {
+	if p(err) {
 		return errors.Wrap(err, "failed to fetch database version")
 	}
 
@@ -129,7 +142,7 @@ func (d *Database) Migrate() error {
 	}
 
 	if version == -1 {
-		panic("Unable to migrate database: database version unknown")
+		log.Panic("Unable to migrate database: database version unknown")
 	} else if version == 0 {
 		_, err := d.db.Exec("UPDATE meta SET `value`=? WHERE `key`=?", strconv.Itoa(DATABASE_VERSION), "version")
 		if err != nil {
@@ -143,22 +156,25 @@ func (d *Database) Migrate() error {
 }
 
 func (d *Database) Initialize() error {
-	username := ""
-	err := d.db.QueryRow("SELECT username FROM accounts").Scan(&username)
-	if err == sql.ErrNoRows {
-		err := d.AddAccount("admin", "password")
-		if err != nil {
-			return errors.Wrap(err, "failed to create first account")
-		}
-
-		ac := &DBChannel{Channel: "&", Topic: "Secret Area of VIP Quality"}
-		d.AddChannel(1, ac)
-
-		uc := &DBChannel{Channel: "#", Topic: "Welcome to AnonIRC"}
-		d.AddChannel(1, uc)
-	} else if err != nil {
-		return errors.Wrap(err, "failed to check for first account")
+	a, err := db.Account(1)
+	if err != nil {
+		return errors.Wrap(err, "failed to initialize")
 	}
+
+	if a.ID > 0 {
+		return nil // Admin account exists
+	}
+
+	err = d.AddAccount("admin", "password")
+	if err != nil {
+		return errors.Wrap(err, "failed to create initial administrator account")
+	}
+
+	ac := &DBChannel{Channel: CHANNEL_SERVER, Topic: "Secret Area of VIP Quality"}
+	d.AddChannel(1, ac)
+
+	uc := &DBChannel{Channel: CHANNEL_LOBBY, Topic: "Welcome to AnonIRC"}
+	d.AddChannel(1, uc)
 
 	return nil
 }
@@ -173,37 +189,21 @@ func (d *Database) Close() error {
 
 // Accounts
 
-func (d *Database) Account(id int) (*DBAccount, error) {
-	rows, err := d.db.Query("SELECT id, username FROM accounts WHERE id=?", id)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to fetch account")
-	}
-
-	var a *DBAccount
-	for rows.Next() {
-		a = new(DBAccount)
-		err = rows.Scan(&a.ID, &a.Username)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to scan account")
-		}
+func (d *Database) Account(id int) (DBAccount, error) {
+	a := DBAccount{}
+	err := d.db.Get(&a, "SELECT * FROM accounts WHERE id=? LIMIT 1", id)
+	if p(err) {
+		return a, errors.Wrap(err, "failed to fetch account")
 	}
 
 	return a, nil
 }
 
-func (d *Database) AccountU(username string) (*DBAccount, error) {
-	rows, err := d.db.Query("SELECT id, username FROM accounts WHERE username=?", generateHash(username))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to fetch account by username")
-	}
-
-	var a *DBAccount
-	for rows.Next() {
-		a = new(DBAccount)
-		err = rows.Scan(&a.ID, &a.Username)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to scan account")
-		}
+func (d *Database) AccountU(username string) (DBAccount, error) {
+	a := DBAccount{}
+	err := d.db.Get(&a, "SELECT * FROM accounts WHERE username=? LIMIT 1", generateHash(username))
+	if p(err) {
+		return a, errors.Wrap(err, "failed to fetch account by username")
 	}
 
 	return a, nil
@@ -212,20 +212,13 @@ func (d *Database) AccountU(username string) (*DBAccount, error) {
 // TODO: Lockout on too many failed attempts
 func (d *Database) Auth(username string, password string) (int, error) {
 	// TODO: Salt in config
-	rows, err := d.db.Query("SELECT id FROM accounts WHERE username=? AND password=?", generateHash(username), generateHash(username+"-"+password))
-	if err != nil {
+	a := DBAccount{}
+	err := d.db.Get(&a, "SELECT * FROM accounts WHERE username=? AND password=? LIMIT 1", generateHash(username), generateHash(username+"-"+password))
+	if p(err) {
 		return 0, errors.Wrap(err, "failed to authenticate account")
 	}
 
-	accountid := 0
-	for rows.Next() {
-		err = rows.Scan(&accountid)
-		if err != nil {
-			return 0, errors.Wrap(err, "failed to authenticate account")
-		}
-	}
-
-	return accountid, nil
+	return a.ID, nil
 }
 
 func (d *Database) GenerateToken() string {
@@ -236,7 +229,7 @@ func (d *Database) AddAccount(username string, password string) error {
 	ex, err := d.AccountU(username)
 	if err != nil {
 		return errors.Wrap(err, "failed to search for existing account while adding account")
-	} else if ex != nil {
+	} else if ex.ID > 0 {
 		return ErrAccountExists
 	}
 
@@ -252,7 +245,7 @@ func (d *Database) SetUsername(accountid int, username string, password string) 
 	ex, err := d.AccountU(username)
 	if err != nil {
 		return errors.Wrap(err, "failed to search for existing account while setting username")
-	} else if ex != nil {
+	} else if ex.ID > 0 {
 		return ErrAccountExists
 	}
 
@@ -275,37 +268,21 @@ func (d *Database) SetPassword(accountid int, username string, password string) 
 
 // Channels
 
-func (d *Database) ChannelID(id int) (*DBChannel, error) {
-	rows, err := d.db.Query("SELECT channel, topic FROM channels WHERE id=?", id)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to fetch channel")
-	}
-
-	var c *DBChannel
-	for rows.Next() {
-		c = new(DBChannel)
-		err = rows.Scan(&c.Channel, &c.Topic)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to scan channel")
-		}
+func (d *Database) ChannelID(id int) (DBChannel, error) {
+	c := DBChannel{}
+	err := d.db.Get(&c, "SELECT * FROM channels WHERE id=? LIMIT 1", id)
+	if p(err) {
+		return c, errors.Wrap(err, "failed to fetch channel")
 	}
 
 	return c, nil
 }
 
-func (d *Database) Channel(channel string) (*DBChannel, error) {
-	rows, err := d.db.Query("SELECT channel, topic FROM channels WHERE channel=?", generateHash(channel))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to fetch channel by key")
-	}
-
-	var c *DBChannel
-	for rows.Next() {
-		c = new(DBChannel)
-		err = rows.Scan(&c.Channel, &c.Topic)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to scan channel")
-		}
+func (d *Database) Channel(channel string) (DBChannel, error) {
+	c := DBChannel{}
+	err := d.db.Get(&c, "SELECT * FROM channels WHERE channel=? LIMIT 1", generateHash(channel))
+	if p(err) {
+		return c, errors.Wrap(err, "failed to fetch channel by key")
 	}
 
 	return c, nil
@@ -315,7 +292,7 @@ func (d *Database) AddChannel(accountid int, channel *DBChannel) error {
 	ex, err := d.Channel(channel.Channel)
 	if err != nil {
 		return errors.Wrap(err, "failed to search for existing channel while adding channel")
-	} else if ex != nil {
+	} else if ex.Channel != "" {
 		return ErrChannelExists
 	}
 
@@ -333,54 +310,107 @@ func (d *Database) AddChannel(accountid int, channel *DBChannel) error {
 
 	return nil
 }
-func (d *Database) GetPermission(accountid int, channel string) (int, error) {
-	rows, err := d.db.Query("SELECT permission FROM permissions WHERE account=? AND channel=?", accountid, generateHash(channel))
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to authenticate account")
+
+// Permissions
+
+func (d *Database) GetPermission(accountid int, channel string) (DBPermission, error) {
+	dbp := DBPermission{}
+
+	// Return REGISTERED by default
+	dbp.Permission = PERMISSION_REGISTERED
+
+	err := d.db.Get(&dbp, "SELECT * FROM permissions WHERE account=? AND channel=? LIMIT 1", accountid, generateHash(channel))
+	if p(err) {
+		return dbp, errors.Wrap(err, "failed to fetch permission")
 	}
 
-	permission := PERMISSION_USER
-	for rows.Next() {
-		err = rows.Scan(&permission)
-		if err != nil {
-			return 0, errors.Wrap(err, "failed to authenticate account")
-		}
-	}
-
-	return permission, nil
+	return dbp, nil
 }
 
 func (d *Database) SetPermission(accountid int, channel string, permission int) error {
 	acc, err := d.Account(accountid)
 	if err != nil {
-		panic(err)
-	} else if acc == nil {
+		log.Panicf("%+v", err)
+	} else if acc.ID == 0 {
 		return nil
 	}
 
 	ch, err := d.Channel(channel)
 	if err != nil {
 		return errors.Wrap(err, "failed to fetch channel while setting permission")
-	} else if ch == nil {
+	} else if ch.Channel == "" {
 		return nil
 	}
 	chh := generateHash(channel)
 
-	rows, err := d.db.Query("SELECT permission FROM permissions WHERE account=? AND channel=?", accountid, chh)
+	dbp, err := d.GetPermission(accountid, chh)
 	if err != nil {
 		return errors.Wrap(err, "failed to set permission")
 	}
 
-	if !rows.Next() {
-		_, err = d.db.Exec("INSERT INTO permissions (channel, account, permission) VALUES (?, ?, ?)", chh, accountid, permission)
-		if err != nil {
-			return errors.Wrap(err, "failed to set permission")
-		}
-	} else {
+	if dbp.Channel != "" {
 		_, err = d.db.Exec("UPDATE permissions SET permission=? WHERE account=? AND channel=?", permission, accountid, chh)
 		if err != nil {
 			return errors.Wrap(err, "failed to set permission")
 		}
+	} else {
+		_, err = d.db.Exec("INSERT INTO permissions (channel, account, permission) VALUES (?, ?, ?)", chh, accountid, permission)
+		if err != nil {
+			return errors.Wrap(err, "failed to set permission")
+		}
+	}
+
+	return nil
+}
+
+// Bans
+
+func (d *Database) Ban(banid int) (DBBan, error) {
+	b := DBBan{}
+	err := d.db.Get(&b, "SELECT * FROM bans WHERE id=? LIMIT 1", banid)
+	if p(err) {
+		return b, errors.Wrap(err, "failed to fetch ban")
+	}
+
+	return b, nil
+}
+
+func (d *Database) BanAddr(addrhash string, channel string) (DBBan, error) {
+	b := DBBan{}
+	err := d.db.Get(&b, "SELECT * FROM bans WHERE channel=? AND `type`=? AND target=?", generateHash(channel), BAN_TYPE_ADDRESS, addrhash)
+	if p(err) {
+		return b, errors.Wrap(err, "failed to fetch ban")
+	}
+
+	return b, nil
+}
+
+func (d *Database) BanAccount(accountid int, channel string) (DBBan, error) {
+	b := DBBan{}
+	err := d.db.Get(&b, "SELECT * FROM bans WHERE channel=? AND `type`=? AND target=?", generateHash(channel), BAN_TYPE_ACCOUNT, accountid)
+	if p(err) {
+		return b, errors.Wrap(err, "failed to fetch ban")
+	}
+
+	return b, nil
+}
+
+func (d *Database) AddBan(b DBBan) error {
+	var err error
+
+	// Channel-specific (not server-wide)
+	if b.Channel != "&" {
+		ex, err := d.Channel(b.Channel)
+		if err != nil {
+			return errors.Wrap(err, "failed to search for existing ban while adding ban")
+		} else if ex.Channel == "" {
+			return ErrChannelDoesNotExist
+		}
+	}
+
+	_, err = d.db.Exec("INSERT INTO bans (`channel`, `type`, `target`, `expires`, `reason`) VALUES (?, ?, ?, ?, ?, ?)", b.Channel, b.Type, b.Target, b.Expires, b.Reason)
+	if p(err) {
+		return errors.Wrap(err, "failed to add ban")
 	}
 
 	return nil

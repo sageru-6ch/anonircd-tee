@@ -28,7 +28,8 @@ import (
 	"time"
 
 	"github.com/jessevdk/go-flags"
-	irc "gopkg.in/sorcix/irc.v2"
+	"github.com/pkg/errors"
+	"gopkg.in/sorcix/irc.v2"
 )
 
 var prefixAnonymous = irc.Prefix{"Anonymous", "Anon", "IRC"}
@@ -45,11 +46,8 @@ const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 const writebuffersize = 10
 
 const (
-	PERMISSION_USER       = 0
-	PERMISSION_SUPERADMIN = 1
-	PERMISSION_ADMIN      = 2
-	PERMISSION_MODERATOR  = 3
-	PERMISSION_VIP        = 4
+	CHANNEL_LOBBY  = "#"
+	CHANNEL_SERVER = "&"
 )
 
 var debugMode = false
@@ -67,7 +65,7 @@ func main() {
 
 	_, err := flags.Parse(&opts)
 	if err != nil {
-		panic(err)
+		log.Panicf("%+v", errors.Wrap(err, "failed to parse flags"))
 	}
 
 	if opts.Debug > 0 {
@@ -85,7 +83,7 @@ func main() {
 	s := NewServer(opts.ConfigFile)
 	err = s.loadConfig()
 	if err != nil {
-		panic(err)
+		log.Panicf("%+v", errors.Wrap(err, "failed to load configuration file"))
 	}
 	s.connectDatabase()
 	defer s.closeDatabase()

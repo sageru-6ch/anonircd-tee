@@ -1,16 +1,21 @@
 package main
 
 import (
+	"log"
 	"net"
 
 	"sync"
+
+	"strings"
+
+	"fmt"
 
 	irc "gopkg.in/sorcix/irc.v2"
 )
 
 type Client struct {
 	Entity
-	ip string
+	iphash string
 
 	ssl     bool
 	nick    string
@@ -39,9 +44,7 @@ func NewClient(identifier string, conn net.Conn, ssl bool) *Client {
 		return nil
 	}
 
-	c.ip = generateHash(ip)
-	// TODO: Check bans, return nil
-
+	c.iphash = generateHash(ip)
 	c.ssl = ssl
 	c.nick = "*"
 	c.conn = conn
@@ -53,8 +56,21 @@ func NewClient(identifier string, conn net.Conn, ssl bool) *Client {
 	return c
 }
 
+func (c *Client) getAccount() (*DBAccount, error) {
+	if c.account == 0 {
+		return nil, nil
+	}
+
+	acc, err := db.Account(c.account)
+	if err != nil {
+		return nil, err
+	}
+
+	return &acc, nil
+}
+
 func (c *Client) registered() bool {
-	// TODO
+	// TODO get account and check if it is valid
 	return c.account > 0
 }
 
@@ -90,6 +106,95 @@ func (c *Client) sendNotice(message string) {
 	c.sendMessage("*** " + message)
 }
 
-func (c *Client) accessDenied() {
-	c.sendNotice("Access denied")
+func (c *Client) accessDenied(permissionRequired int) {
+	ex := ""
+	if permissionRequired > PERMISSION_CLIENT {
+		ex = fmt.Sprintf(", that command is available to %ss only", strings.ToLower(permissionLabels[permissionRequired]))
+		if permissionRequired == PERMISSION_REGISTERED {
+			ex += " - Reply HELP for more info (see REGISTER and IDENTIFY)"
+		}
+	}
+
+	c.sendNotice("Access denied" + ex)
+}
+
+func (c *Client) identify(username string, password string) bool {
+	accountid, err := db.Auth(username, password)
+	if err != nil {
+		log.Panicf("%+v", err)
+	}
+
+	account, err := db.Account(accountid)
+	if err != nil {
+		log.Panicf("%+v", err)
+	} else if account.ID == 0 {
+		return false
+	}
+
+	c.account = accountid
+	return true
+}
+
+func (c *Client) getPermission(channel string) int {
+	if c.account == 0 {
+		return PERMISSION_CLIENT
+	}
+
+	p, err := db.GetPermission(c.account, channel)
+	if err != nil {
+		log.Panicf("%+v", err)
+	}
+
+	return p.Permission
+}
+
+func (c *Client) globalPermission() int {
+	return c.getPermission("&")
+}
+
+func (c *Client) canUse(command string, channel string) bool {
+	command = strings.ToUpper(command)
+	req := c.permissionRequired(command)
+
+	globalPermission := c.globalPermission()
+	if globalPermission >= req {
+		return true
+	} else if containsString(serverCommands, command) {
+		return false
+	}
+
+	return c.getPermission(channel) >= req
+}
+
+func (c *Client) permissionRequired(command string) int {
+	command = strings.ToUpper(command)
+	for permissionRequired, commands := range commandRestrictions {
+		for _, cmd := range commands {
+			if cmd == command {
+				return permissionRequired
+			}
+		}
+	}
+
+	return 0
+}
+
+func (c *Client) isBanned(channel string) (bool, string) {
+	b, err := db.BanAddr(c.iphash, channel)
+	if err != nil {
+		log.Panicf("%+v", err)
+	}
+
+	if b.Channel == "" && c.account > 0 {
+		b, err = db.BanAccount(c.account, channel)
+		if err != nil {
+			log.Panicf("%+v", err)
+		}
+	}
+
+	if b.Channel != "" {
+		return true, b.Reason
+	}
+
+	return false, ""
 }

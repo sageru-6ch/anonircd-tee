@@ -2,16 +2,19 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/sorcix/irc.v2"
 )
 
 type Channel struct {
 	Entity
 
 	clients *sync.Map
-	logs    []*ChannelLog
+	logs    map[int64]*ChannelLog
 
 	topic     string
 	topictime int64
@@ -23,6 +26,7 @@ type ChannelLog struct {
 	Timestamp int64
 	Client    string
 	IP        string
+	Account   int
 	Action    string
 	Message   string
 }
@@ -30,11 +34,11 @@ type ChannelLog struct {
 const CHANNEL_LOGS_PER_PAGE = 25
 
 func (cl *ChannelLog) Identifier(index int) string {
-	return fmt.Sprintf("%03d%02d", index+1, cl.Timestamp%100)
+	return fmt.Sprintf("%03d%02d", index, cl.Timestamp%100)
 }
 
 func (cl *ChannelLog) Print(index int, channel string) string {
-	return strings.TrimSpace(fmt.Sprintf("%s %s %5s %4s %s", time.Unix(0, cl.Timestamp).Format(time.Stamp), channel, cl.Identifier(index), cl.Action, cl.Message))
+	return strings.TrimSpace(fmt.Sprintf("%s %s %s %4s %s", time.Unix(0, cl.Timestamp).Format(time.Stamp), channel, cl.Identifier(index), cl.Action, cl.Message))
 }
 
 func NewChannel(identifier string) *Channel {
@@ -42,6 +46,7 @@ func NewChannel(identifier string) *Channel {
 	c.Initialize(ENTITY_CHANNEL, identifier)
 
 	c.clients = new(sync.Map)
+	c.logs = make(map[int64]*ChannelLog)
 
 	return c
 }
@@ -50,13 +55,14 @@ func (c *Channel) Log(client *Client, action string, message string) {
 	c.Lock()
 	defer c.Unlock()
 
-	// TODO: Log size limiting, max capacity will be 998 entries
+	// TODO: Log size limiting, max capacity will be 999 entries
 	// Log hash of IP address which is used later when connecting/joining
 
-	c.logs = append(c.logs, &ChannelLog{Timestamp: time.Now().UTC().UnixNano(), Client: client.identifier, IP: client.ip, Action: action, Message: message})
+	nano := time.Now().UTC().UnixNano()
+	c.logs[nano] = &ChannelLog{Timestamp: nano, Client: client.identifier, IP: client.iphash, Account: client.account, Action: action, Message: message}
 }
 
-func (c *Channel) RevealLog(page int) []string {
+func (c *Channel) RevealLog(page int, full bool) []string {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -66,14 +72,30 @@ func (c *Channel) RevealLog(page int) []string {
 	var ls []string
 	logsRemain := false
 	j := 0
-	for i, l := range c.logs {
+
+	var nanos int64arr
+	for n := range c.logs {
+		nanos = append(nanos, n)
+	}
+	sort.Sort(nanos)
+
+	// To perform the opertion you want
+	var l *ChannelLog
+	var ok bool
+	for i, nano := range nanos {
+		if l, ok = c.logs[nano]; !ok {
+			continue
+		}
+
 		if page == -1 || i >= (CHANNEL_LOGS_PER_PAGE*(page-1)) {
-			if page > -1 && j == CHANNEL_LOGS_PER_PAGE {
-				logsRemain = true
-				break
+			if full || (l.Action != irc.JOIN && l.Action != irc.PART) {
+				if page > -1 && j == CHANNEL_LOGS_PER_PAGE {
+					logsRemain = true
+					break
+				}
+				ls = append(ls, l.Print(i, c.identifier))
+				j++
 			}
-			ls = append(ls, l.Print(i, c.identifier))
-			j++
 		}
 	}
 
@@ -96,21 +118,31 @@ func (c *Channel) RevealLog(page int) []string {
 	return ls
 }
 
-func (c *Channel) RevealHash(identifier string) string {
+func (c *Channel) RevealInfo(identifier string) (string, int) {
 	if len(identifier) != 5 {
-		return ""
+		return "", 0
 	}
 
 	c.RLock()
 	defer c.RUnlock()
 
-	for i, l := range c.logs {
-		if l.Identifier(i) == identifier {
-			return l.IP
+	var nanos int64arr
+	for n := range c.logs {
+		nanos = append(nanos, n)
+	}
+	sort.Sort(nanos)
+
+	var l *ChannelLog
+	var ok bool
+	for i, nano := range nanos {
+		if l, ok = c.logs[nano]; !ok {
+			continue
+		} else if l.Identifier(i) == identifier {
+			return l.IP, l.Account
 		}
 	}
 
-	return ""
+	return "", 0
 }
 
 func (c *Channel) HasClient(client string) bool {

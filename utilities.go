@@ -1,14 +1,13 @@
 package main
 
 import (
+	"crypto/md5"
+	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"math/rand"
 	"sort"
 	"strings"
-
-	"crypto/md5"
-
-	"fmt"
 
 	"golang.org/x/crypto/sha3"
 )
@@ -19,6 +18,12 @@ type Pair struct {
 }
 
 type PairList []Pair
+
+type int64arr []int64
+
+func (a int64arr) Len() int           { return len(a) }
+func (a int64arr) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a int64arr) Less(i, j int) bool { return a[i] < a[j] }
 
 func (p PairList) Len() int {
 	return len(p)
@@ -61,4 +66,18 @@ func generateHash(s string) string {
 	}
 
 	return base64.URLEncoding.EncodeToString(sha512.Sum(nil))
+}
+
+func containsString(s []string, e string) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
+}
+
+// Problem
+func p(err error) bool {
+	return err != nil && err != sql.ErrNoRows
 }

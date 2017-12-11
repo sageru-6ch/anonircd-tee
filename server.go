@@ -10,17 +10,16 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"sort"
-
 	"github.com/BurntSushi/toml"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/sha3"
-	irc "gopkg.in/sorcix/irc.v2"
+	"gopkg.in/sorcix/irc.v2"
 )
 
 const (
@@ -30,11 +29,13 @@ const (
 	// User commands
 	COMMAND_REGISTER = "REGISTER"
 	COMMAND_IDENTIFY = "IDENTIFY"
+	COMMAND_TOKEN    = "TOKEN"
 	COMMAND_USERNAME = "USERNAME"
 	COMMAND_PASSWORD = "PASSWORD"
 
 	// Channel/server commands
 	COMMAND_FOUND  = "FOUND"
+	COMMAND_DROP   = "DROP"
 	COMMAND_GRANT  = "GRANT"
 	COMMAND_REVEAL = "REVEAL"
 	COMMAND_KICK   = "KICK"
@@ -46,6 +47,81 @@ const (
 	COMMAND_REHASH  = "REHASH"
 	COMMAND_UPGRADE = "UPGRADE"
 )
+
+var serverCommands = []string{COMMAND_KILL, COMMAND_STATS, COMMAND_REHASH, COMMAND_UPGRADE}
+
+const (
+	PERMISSION_CLIENT     = 0
+	PERMISSION_REGISTERED = 1
+	PERMISSION_VIP        = 2
+	PERMISSION_MODERATOR  = 3
+	PERMISSION_ADMIN      = 4
+	PERMISSION_SUPERADMIN = 5
+)
+
+var permissionLabels = map[int]string{
+	PERMISSION_CLIENT:     "Client",
+	PERMISSION_REGISTERED: "Registered",
+	PERMISSION_VIP:        "VIP",
+	PERMISSION_MODERATOR:  "Moderator",
+	PERMISSION_ADMIN:      "Administrator",
+	PERMISSION_SUPERADMIN: "Super Administrator",
+}
+
+var commandRestrictions = map[int][]string{
+	PERMISSION_REGISTERED: {COMMAND_TOKEN, COMMAND_USERNAME, COMMAND_PASSWORD, COMMAND_FOUND},
+	PERMISSION_MODERATOR:  {COMMAND_REVEAL, COMMAND_KICK, COMMAND_BAN},
+	PERMISSION_ADMIN:      {COMMAND_GRANT},
+	PERMISSION_SUPERADMIN: {COMMAND_DROP, COMMAND_KILL, COMMAND_STATS, COMMAND_REHASH, COMMAND_UPGRADE}}
+
+var helpDuration = "Duration can be 0 to never expire, or e.g. 30m, 1h, 2d, 3w"
+var commandUsage = map[string][]string{
+	COMMAND_HELP: {"[command]",
+		"Print info regarding all commands or a specific command"},
+	COMMAND_INFO: {"[channel]",
+		"When a channel is specified, prints info including whether it is registered",
+		"Without a channel, server info is printed"},
+	COMMAND_REGISTER: {"<username> <password>",
+		"Create an account, allowing you to found channels and moderate existing channels",
+		"See IDENTIFY, FOUND, GRANT"},
+	COMMAND_IDENTIFY: {"[username] <password>",
+		"Identify to a previously registered account",
+		"If username is omitted, it will be replaced with your current nick",
+		"Note that you may automatically identify when connecting by specifying a server password of your username and password separated by a colon - Example:  admin:hunter2"},
+	COMMAND_TOKEN: {"<channel>",
+		"Returns a token which can be used by channel administrators to grant special access to your account"},
+	COMMAND_USERNAME: {"<username> <password> <new username> <confirm new username>",
+		"Change your username"},
+	COMMAND_PASSWORD: {"<username> <password> <new password> <confirm new password>",
+		"Change your password"},
+	COMMAND_FOUND: {"<channel>",
+		"Register a channel"},
+	COMMAND_GRANT: {"<channel> [account] [updated access]",
+		"When an account token isn't specified, all permissions are listed",
+		"View or update a user's access level by specifying their account token",
+		"To remove an account, set their access level to User"},
+	COMMAND_REVEAL: {"<channel> [page] [full]",
+		"Print channel log, allowing KICK/BAN to be used",
+		fmt.Sprintf("Results start at page 1, %d per page", CHANNEL_LOGS_PER_PAGE),
+		"All log entries are returned when viewing page -1",
+		"By default joins and parts are hidden, use 'full' to show them"},
+	COMMAND_KICK: {"<channel> <5 digit log number> [reason]",
+		"Kick a user from a channel"},
+	COMMAND_BAN: {"<channel> <5 digit log number> <duration> [reason]",
+		"Kick and ban a user from a channel",
+		helpDuration},
+	COMMAND_DROP: {"<channel> <confirm channel>",
+		"Delete all channel data, allowing it to be FOUNDed again"},
+	COMMAND_KILL: {"<channel> <5 digit log number> <duration> [reason]",
+		"Disconnect and ban a user from the server",
+		helpDuration},
+	COMMAND_STATS: {"",
+		"Print the current number of clients and channels"},
+	COMMAND_REHASH: {"",
+		"Reload the server configuration"},
+	COMMAND_UPGRADE: {"",
+		"Upgrade the server without disconnecting clients"},
+}
 
 type Config struct {
 	Salt     string
@@ -59,7 +135,6 @@ type Server struct {
 	config       *Config
 	configfile   string
 	created      int64
-	db           *Database
 	clients      *sync.Map
 	channels     *sync.Map
 	odyssey      *os.File
@@ -71,12 +146,13 @@ type Server struct {
 	*sync.RWMutex
 }
 
+var db = &Database{}
+
 func NewServer(configfile string) *Server {
 	s := &Server{}
 	s.config = &Config{}
 	s.configfile = configfile
 	s.created = time.Now().Unix()
-	s.db = new(Database)
 	s.clients = new(sync.Map)
 	s.channels = new(sync.Map)
 	s.odysseymutex = new(sync.RWMutex)
@@ -150,6 +226,17 @@ func (s *Server) getClient(client string) *Client {
 func (s *Server) getClients(channel string) map[string]*Client {
 	clients := make(map[string]*Client)
 
+	if channel == "" {
+		s.clients.Range(func(k, v interface{}) bool {
+			cl := s.getClient(k.(string))
+			if cl != nil {
+				clients[cl.identifier] = cl
+			}
+			return true
+		})
+		return clients
+	}
+
 	ch := s.getChannel(channel)
 	if ch == nil {
 		return clients
@@ -157,7 +244,7 @@ func (s *Server) getClients(channel string) map[string]*Client {
 
 	ch.clients.Range(func(k, v interface{}) bool {
 		cl := s.getClient(k.(string))
-		if channel == "" || cl != nil {
+		if cl != nil {
 			clients[cl.identifier] = cl
 		}
 		return true
@@ -177,28 +264,33 @@ func (s *Server) clientCount() int {
 }
 
 func (s *Server) revealClient(channel string, identifier string) *Client {
-	if len(identifier) != 5 {
+	riphash, raccount := s.revealClientInfo(channel, identifier)
+	if riphash == "" && raccount == 0 {
+		log.Println("hash not found")
 		return nil
 	}
-
-	ch := s.getChannel(channel)
-	if ch == nil {
-		return nil
-	}
-
-	rip := ch.RevealHash(identifier)
-	if rip == "" {
-		return nil
-	}
-
-	cls := s.getClients(ch.identifier)
+	log.Println("have hash")
+	cls := s.getClients("")
 	for _, rcl := range cls {
-		if rcl.ip == rip {
+		if rcl.iphash == riphash || (rcl.account > 0 && rcl.account == raccount) {
 			return rcl
 		}
 	}
 
 	return nil
+}
+
+func (s *Server) revealClientInfo(channel string, identifier string) (string, int) {
+	if len(identifier) != 5 {
+		return "", 0
+	}
+
+	ch := s.getChannel(channel)
+	if ch == nil {
+		return "", 0
+	}
+
+	return ch.RevealInfo(identifier)
 }
 
 func (s *Server) inChannel(channel string, client string) bool {
@@ -224,8 +316,8 @@ func (s *Server) joinChannel(channel string, client string) {
 	if len(channel) == 0 {
 		return
 	} else if channel[0] == '&' {
-		if s.globalPermission(cl) == PERMISSION_USER {
-			cl.accessDenied()
+		if cl.globalPermission() < PERMISSION_VIP {
+			cl.accessDenied(0)
 			return
 		}
 	} else if channel[0] != '#' {
@@ -238,6 +330,16 @@ func (s *Server) joinChannel(channel string, client string) {
 		s.channels.Store(channel, ch)
 	} else if ch.hasMode("z") && !cl.ssl {
 		cl.sendNotice("Unable to join " + channel + ": SSL connections only (channel mode +z)")
+		return
+	}
+
+	banned, reason := cl.isBanned(channel)
+	if banned {
+		ex := ""
+		if reason != "" {
+			ex = ". Reason: " + reason
+		}
+		cl.sendNotice("Unable to join " + channel + ": You are banned" + ex)
 		return
 	}
 
@@ -272,7 +374,7 @@ func (s *Server) partAllChannels(client string, reason string) {
 	}
 }
 
-func (s *Server) revealChannelLog(channel string, client string, page int) {
+func (s *Server) revealChannelLog(channel string, client string, page int, full bool) {
 	cl := s.getClient(client)
 	if cl == nil {
 		return
@@ -288,7 +390,7 @@ func (s *Server) revealChannelLog(channel string, client string, page int) {
 		return
 	}
 
-	r := ch.RevealLog(page)
+	r := ch.RevealLog(page, full)
 	for _, rev := range r {
 		cl.sendMessage(rev)
 	}
@@ -443,11 +545,11 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 		return
 	}
 
-	chp, err := s.db.GetPermission(cl.account, channel)
+	chp, err := db.GetPermission(cl.account, channel)
 	if err != nil {
-		panic(err)
-	} else if ch.hasMode("t") && (cl.account == 0 || chp == PERMISSION_USER) {
-		cl.accessDenied()
+		log.Panicf("%+v", err)
+	} else if ch.hasMode("t") && (chp.Permission < PERMISSION_VIP) {
+		cl.accessDenied(PERMISSION_VIP)
 		return
 	}
 
@@ -485,9 +587,9 @@ func (s *Server) handleMode(c *Client, params []string) {
 			// Send channel creation time
 			c.writeMessage(strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{})
 		} else if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
-			if !s.hasPermission(c, irc.MODE, params[0]) {
+			if !c.canUse(irc.MODE, params[0]) {
 				// TODO: Send proper mode denied message
-				c.accessDenied()
+				c.accessDenied(c.permissionRequired(irc.MODE))
 				return
 			}
 
@@ -582,55 +684,11 @@ func (s *Server) handleMode(c *Client, params []string) {
 }
 
 func (s *Server) buildUsage(cl *Client, command string) map[string][]string {
-	helpDuration := "Duration can be 0 to never expire, or e.g. 30m, 1h, 2d, 3w"
-
-	var commandUsage = map[string][]string{
-		COMMAND_HELP: {"[command]",
-			"Print info regarding all commands or a specific command"},
-		COMMAND_INFO: {"[channel]",
-			"Print info such as whether a channel is registered",
-			"If channel is omitted, server info is printed instead"},
-		COMMAND_REGISTER: {"<username> <password>",
-			"Create an account, allowing you to found channels and moderate existing channels (with permission)",
-			"See IDENTIFY"},
-		COMMAND_IDENTIFY: {"[username] <password>",
-			"Identify to a previously registered account",
-			"If username is omitted, it will be replaced with your current nick",
-			"Note that you may identify when connecting by sending the following server password:",
-			"Your username and password:  <username>:<password>",
-			"Or your username and token:  <username>:<token>",
-			"E.g.  admin:hunter2"},
-		COMMAND_USERNAME: {"<username> <password> <new username> <confirm new username>",
-			"Change your username"},
-		COMMAND_PASSWORD: {"<username> <password> <new password> <confirm new password>",
-			"Change your password"},
-		COMMAND_FOUND: {"<channel>",
-			"Register a channel"},
-		COMMAND_REVEAL: {"<channel> [page]",
-			"Print channel log, allowing KICK/BAN to be used",
-			fmt.Sprintf("Results start at page 1, %d per page", CHANNEL_LOGS_PER_PAGE),
-			"All log entries are returned when viewing page -1"},
-		COMMAND_KICK: {"<channel> <5 digit log number> [reason]",
-			"Kick a user from a channel"},
-		COMMAND_BAN: {"<channel> <5 digit log number> <duration> [reason]",
-			"Kick and ban a user from a channel",
-			helpDuration},
-		COMMAND_KILL: {"<channel> <5 digit log number> <duration> [reason]",
-			"Disconnect and ban a user from the server",
-			helpDuration},
-		COMMAND_STATS: {"",
-			"Print the current number of clients and channels"},
-		COMMAND_REHASH: {"",
-			"Reload the server configuration"},
-		COMMAND_UPGRADE: {"",
-			"Upgrade the server without disconnecting clients"},
-	}
-
 	u := map[string][]string{}
 	command = strings.ToUpper(command)
 	for cmd, usage := range commandUsage {
 		if command == COMMAND_HELP || cmd == command {
-			if s.hasPermission(cl, cmd, "") {
+			if cl.canUse(cmd, "") {
 				u[cmd] = usage
 			}
 		}
@@ -668,6 +726,15 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 
 	var err error
 	command = strings.ToUpper(command)
+	ch := ""
+	if len(params) > 0 {
+		ch = params[0]
+	}
+	if !cl.canUse(command, ch) {
+		cl.accessDenied(cl.permissionRequired(command))
+		return
+	}
+
 	switch command {
 	case COMMAND_HELP:
 		cmd := command
@@ -677,7 +744,8 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		s.sendUsage(cl, cmd)
 		return
 	case COMMAND_INFO:
-		cl.sendMessage("AnonIRCd https://github.com/sageru-6ch/anonircd")
+		// TODO: when channel is supplied, send whether it is registered and show a notice that it is dropping soon if no super admins have logged in in X days
+		cl.sendMessage("Server info: AnonIRCd https://github.com/sageru-6ch/anonircd")
 		return
 	case COMMAND_REGISTER:
 		if len(params) == 0 {
@@ -699,12 +767,24 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			password = params[1]
 		}
 
-		authSuccess := s.identify(cl, username, password)
+		authSuccess := cl.identify(username, password)
 		if authSuccess {
 			cl.sendNotice("Identified successfully")
 
-			if s.globalPermission(cl) != PERMISSION_USER {
-				s.joinChannel("&", cl.identifier)
+			if cl.globalPermission() >= PERMISSION_VIP {
+				s.joinChannel(CHANNEL_SERVER, cl.identifier)
+			}
+
+			for clch := range s.getChannels(cl.identifier) {
+				banned, br := cl.isBanned(clch)
+				if banned {
+					reason := "Banned"
+					if br != "" {
+						reason += ": " + br
+					}
+					s.partChannel(clch, cl.identifier, reason)
+					return
+				}
 			}
 		} else {
 			cl.sendNotice("Failed to identify, incorrect username/password")
@@ -714,7 +794,7 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			cl.sendError("You must identify before using that command")
 		}
 
-		if len(params) == 0 || len(params) > 4 {
+		if len(params) == 0 || len(params) < 4 {
 			s.sendUsage(cl, command)
 			return
 		}
@@ -725,9 +805,9 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		}
 		// TODO: Alphanumeric username
 
-		accid, err := s.db.Auth(params[0], params[1])
+		accid, err := db.Auth(params[0], params[1])
 		if err != nil {
-			panic(err)
+			log.Panicf("%+v", err)
 		}
 
 		if accid == 0 {
@@ -735,17 +815,13 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			return
 		}
 
-		err = s.db.SetUsername(accid, params[2], params[1])
+		err = db.SetUsername(accid, params[2], params[1])
 		if err != nil {
-			panic(err)
+			log.Panicf("%+v", err)
 		}
 		cl.sendMessage("Username changed successfully")
 	case COMMAND_PASSWORD:
-		if cl.account == 0 {
-			cl.sendError("You must identify before using that command")
-		}
-
-		if len(params) == 0 || len(params) > 4 {
+		if len(params) == 0 || len(params) < 4 {
 			s.sendUsage(cl, command)
 			return
 		}
@@ -755,9 +831,9 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			return
 		}
 
-		accid, err := s.db.Auth(params[0], params[1])
+		accid, err := db.Auth(params[0], params[1])
 		if err != nil {
-			panic(err)
+			log.Panicf("%+v", err)
 		}
 
 		if accid == 0 {
@@ -765,9 +841,9 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			return
 		}
 
-		err = s.db.SetPassword(accid, params[0], params[2])
+		err = db.SetPassword(accid, params[0], params[2])
 		if err != nil {
-			panic(err)
+			log.Panicf("%+v", err)
 		}
 		cl.sendMessage("Password changed successfully")
 	case COMMAND_REVEAL:
@@ -783,11 +859,6 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			return
 		}
 
-		if !s.hasPermission(cl, COMMAND_REVEAL, params[0]) {
-			cl.accessDenied()
-			return
-		}
-
 		page := 1
 		if len(params) > 1 {
 			page, err = strconv.Atoi(params[1])
@@ -797,7 +868,14 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			}
 		}
 
-		s.revealChannelLog(params[0], cl.identifier, page)
+		full := false
+		if len(params) > 2 {
+			if strings.ToLower(params[2]) == "full" {
+				full = true
+			}
+		}
+
+		s.revealChannelLog(params[0], cl.identifier, page, full)
 	case COMMAND_KICK:
 		if len(params) < 2 {
 			s.sendUsage(cl, command)
@@ -807,11 +885,6 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		ch := s.getChannel(params[0])
 		if ch == nil {
 			cl.sendError("Unable to kick, invalid channel specified")
-			return
-		}
-
-		if !s.hasPermission(cl, COMMAND_KICK, params[0]) {
-			cl.accessDenied()
 			return
 		}
 
@@ -839,30 +912,22 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			return
 		}
 
-		if !s.hasPermission(cl, COMMAND_BAN, params[0]) {
-			cl.accessDenied()
-			return
-		}
-
 		rcl := s.revealClient(params[0], params[1])
 		if rcl == nil {
 			cl.sendError("Unable to ban, client not found or no longer connected")
 			return
 		}
 
-		reason := "Banned"
+		reason := strings.Join(params[3:], " ")
+
+		partmsg := "Banned"
 		if len(params) > 3 {
-			reason = fmt.Sprintf("%s: %s", reason, strings.Join(params[3:], " "))
+			partmsg = fmt.Sprintf("%s: %s", partmsg, reason)
 		}
 		// TODO: Apply ban in DB
-		s.partChannel(ch.identifier, rcl.identifier, reason)
+		s.partChannel(ch.identifier, rcl.identifier, partmsg)
 		cl.sendMessage(fmt.Sprintf("Banned %s %s", params[0], params[1]))
 	case COMMAND_KILL:
-		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
-			cl.accessDenied()
-			return
-		}
-
 		if len(params) < 3 {
 			s.sendUsage(cl, command)
 			return
@@ -882,17 +947,9 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		s.killClient(rcl)
 		cl.sendMessage(fmt.Sprintf("Killed %s %s", params[0], params[1]))
 	case COMMAND_STATS:
-		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
-			cl.accessDenied()
-			return
-		}
 
 		cl.sendMessage(fmt.Sprintf("%d clients in %d channels", s.clientCount(), s.channelCount()))
 	case COMMAND_REHASH:
-		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
-			cl.accessDenied()
-			return
-		}
 
 		err := s.reload()
 		if err != nil {
@@ -901,11 +958,6 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			cl.sendMessage("Reloaded configuration")
 		}
 	case COMMAND_UPGRADE:
-		if s.globalPermission(cl) != PERMISSION_SUPERADMIN {
-			cl.accessDenied()
-			return
-		}
-
 		// TODO
 	}
 }
@@ -950,76 +1002,6 @@ func (s *Server) handlePrivmsg(channel string, client string, message string) {
 		return true
 	})
 	ch.Log(cl, "CHAT", message)
-}
-
-func (s *Server) identify(c *Client, username string, password string) bool {
-	accountid, err := s.db.Auth(username, password)
-	if err != nil {
-		panic(err)
-	}
-
-	var account *DBAccount
-	if accountid > 0 {
-		account, err = s.db.Account(accountid)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	if account == nil {
-		return false
-	}
-
-	c.account = accountid
-	return true
-}
-
-func (s *Server) globalPermission(c *Client) int {
-	globalPermission := PERMISSION_USER
-	if c.account > 0 {
-		gp, err := s.db.GetPermission(c.account, "&")
-		if err != nil {
-			panic(err)
-		}
-		globalPermission = gp
-	}
-
-	return globalPermission
-}
-
-func (s *Server) hasPermission(c *Client, command string, channel string) bool {
-	globalPermission := s.globalPermission(c)
-	if globalPermission == PERMISSION_SUPERADMIN {
-		return true
-	}
-
-	chp := PERMISSION_USER
-	var err error
-	if channel != "" {
-		chp, err = s.db.GetPermission(c.account, channel)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	command = strings.ToUpper(command)
-	if command == COMMAND_HELP || command == COMMAND_INFO || command == COMMAND_REGISTER || command == COMMAND_IDENTIFY {
-		return true
-	} else if command == COMMAND_USERNAME || command == COMMAND_PASSWORD || command == COMMAND_FOUND || command == COMMAND_GRANT || command == COMMAND_KICK || command == COMMAND_BAN || command == irc.MODE {
-		if !c.registered() {
-			return false
-		} else if channel == "" {
-			return true
-		}
-
-		if command == COMMAND_GRANT {
-			return chp == PERMISSION_SUPERADMIN
-		} else if command == COMMAND_KICK || command == COMMAND_BAN || command == irc.MODE {
-			return chp == PERMISSION_SUPERADMIN || chp == PERMISSION_ADMIN || chp == PERMISSION_MODERATOR
-		}
-	}
-
-	return false
 }
 
 func (s *Server) handleRead(c *Client) {
@@ -1069,16 +1051,16 @@ func (s *Server) handleRead(c *Client) {
 				c.writeMessage(motdcode, []string{"  " + motdmsg})
 			}
 
-			s.joinChannel("#", c.identifier)
-			if s.globalPermission(c) != PERMISSION_USER {
-				s.joinChannel("&", c.identifier)
+			s.joinChannel(CHANNEL_LOBBY, c.identifier)
+			if c.globalPermission() >= PERMISSION_VIP {
+				s.joinChannel(CHANNEL_SERVER, c.identifier)
 			}
 		} else if msg.Command == irc.PASS && c.user == "" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			// TODO: Add auth and multiple failed attempts ban
 			authSuccess := false
 			psplit := strings.SplitN(msg.Params[0], ":", 2)
 			if len(psplit) == 2 {
-				authSuccess = s.identify(c, psplit[0], psplit[1])
+				authSuccess = c.identify(psplit[0], psplit[1])
 			}
 
 			if !authSuccess {
@@ -1139,10 +1121,15 @@ func (s *Server) handleRead(c *Client) {
 				key := k.(string)
 				ch := v.(*Channel)
 
-				if ch != nil && !ch.hasMode("p") && !ch.hasMode("s") {
-					chans[key] = s.clientsInChannel(key, c.identifier)
+				if key[0] == '&' && c.globalPermission() < PERMISSION_VIP {
+					return true
 				}
 
+				if ch == nil || ch.hasMode("p") || ch.hasMode("s") {
+					return true
+				}
+
+				chans[key] = s.clientsInChannel(key, c.identifier)
 				return true
 			})
 
@@ -1249,7 +1236,14 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	}
 
 	client := NewClient(identifier, conn, ssl)
-	if client == nil {
+	banned := true
+	reason := ""
+	if client != nil {
+		banned, reason = client.isBanned("")
+	}
+	if banned {
+		// TODO: Send banned message
+		_ = reason
 		return // Banned
 	}
 	s.clients.Store(client.identifier, client)
@@ -1258,7 +1252,6 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 	s.handleRead(client) // Block until the connection is closed
 
 	s.killClient(client)
-	client.conn.Close()
 }
 
 func (s *Server) killClient(c *Client) {
@@ -1360,16 +1353,16 @@ func (s *Server) pingClients() {
 }
 
 func (s *Server) connectDatabase() {
-	err := s.db.Connect(s.config.DBDriver, s.config.DBSource)
+	err := db.Connect(s.config.DBDriver, s.config.DBSource)
 	if err != nil {
-		panic(err)
+		log.Panicf("%+v", err)
 	}
 }
 
 func (s *Server) closeDatabase() {
-	err := s.db.Close()
+	err := db.Close()
 	if err != nil {
-		panic(err)
+		log.Panicf("%+v", err)
 	}
 }
 
