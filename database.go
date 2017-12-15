@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/securecookie"
 	"github.com/jmoiron/sqlx"
@@ -49,7 +50,7 @@ const (
 )
 
 type DBAccount struct {
-	ID       int
+	ID       int64
 	Username string
 	Password string
 }
@@ -57,13 +58,13 @@ type DBAccount struct {
 type DBChannel struct {
 	Channel   string
 	Topic     string
-	TopicTime int
+	TopicTime int64
 	Password  string
 }
 
 type DBPermission struct {
 	Channel    string
-	Account    int
+	Account    int64
 	Permission int
 }
 
@@ -77,7 +78,7 @@ type DBBan struct {
 	Channel string
 	Type    int
 	Target  string
-	Expires int
+	Expires int64
 	Reason  string
 }
 
@@ -189,7 +190,7 @@ func (d *Database) Close() error {
 
 // Accounts
 
-func (d *Database) Account(id int) (DBAccount, error) {
+func (d *Database) Account(id int64) (DBAccount, error) {
 	a := DBAccount{}
 	err := d.db.Get(&a, "SELECT * FROM accounts WHERE id=? LIMIT 1", id)
 	if p(err) {
@@ -210,7 +211,7 @@ func (d *Database) AccountU(username string) (DBAccount, error) {
 }
 
 // TODO: Lockout on too many failed attempts
-func (d *Database) Auth(username string, password string) (int, error) {
+func (d *Database) Auth(username string, password string) (int64, error) {
 	// TODO: Salt in config
 	a := DBAccount{}
 	err := d.db.Get(&a, "SELECT * FROM accounts WHERE username=? AND password=? LIMIT 1", generateHash(username), generateHash(username+"-"+password))
@@ -241,7 +242,7 @@ func (d *Database) AddAccount(username string, password string) error {
 	return nil
 }
 
-func (d *Database) SetUsername(accountid int, username string, password string) error {
+func (d *Database) SetUsername(accountid int64, username string, password string) error {
 	ex, err := d.AccountU(username)
 	if err != nil {
 		return errors.Wrap(err, "failed to search for existing account while setting username")
@@ -257,7 +258,7 @@ func (d *Database) SetUsername(accountid int, username string, password string) 
 	return nil
 }
 
-func (d *Database) SetPassword(accountid int, username string, password string) error {
+func (d *Database) SetPassword(accountid int64, username string, password string) error {
 	_, err := d.db.Exec("UPDATE accounts SET password=? WHERE id=?", generateHash(username+"-"+password), accountid)
 	if err != nil {
 		return errors.Wrap(err, "failed to set password")
@@ -268,7 +269,7 @@ func (d *Database) SetPassword(accountid int, username string, password string) 
 
 // Channels
 
-func (d *Database) ChannelID(id int) (DBChannel, error) {
+func (d *Database) ChannelID(id int64) (DBChannel, error) {
 	c := DBChannel{}
 	err := d.db.Get(&c, "SELECT * FROM channels WHERE id=? LIMIT 1", id)
 	if p(err) {
@@ -288,7 +289,7 @@ func (d *Database) Channel(channel string) (DBChannel, error) {
 	return c, nil
 }
 
-func (d *Database) AddChannel(accountid int, channel *DBChannel) error {
+func (d *Database) AddChannel(accountid int64, channel *DBChannel) error {
 	ex, err := d.Channel(channel.Channel)
 	if err != nil {
 		return errors.Wrap(err, "failed to search for existing channel while adding channel")
@@ -313,7 +314,7 @@ func (d *Database) AddChannel(accountid int, channel *DBChannel) error {
 
 // Permissions
 
-func (d *Database) GetPermission(accountid int, channel string) (DBPermission, error) {
+func (d *Database) GetPermission(accountid int64, channel string) (DBPermission, error) {
 	dbp := DBPermission{}
 
 	// Return REGISTERED by default
@@ -327,7 +328,7 @@ func (d *Database) GetPermission(accountid int, channel string) (DBPermission, e
 	return dbp, nil
 }
 
-func (d *Database) SetPermission(accountid int, channel string, permission int) error {
+func (d *Database) SetPermission(accountid int64, channel string, permission int) error {
 	acc, err := d.Account(accountid)
 	if err != nil {
 		log.Panicf("%+v", err)
@@ -377,7 +378,11 @@ func (d *Database) Ban(banid int) (DBBan, error) {
 
 func (d *Database) BanAddr(addrhash string, channel string) (DBBan, error) {
 	b := DBBan{}
-	err := d.db.Get(&b, "SELECT * FROM bans WHERE channel=? AND `type`=? AND target=?", generateHash(channel), BAN_TYPE_ADDRESS, addrhash)
+	if addrhash == "" {
+		return b, nil
+	}
+
+	err := d.db.Get(&b, "SELECT * FROM bans WHERE channel=? AND `type`=? AND target=? AND (`expires` = 0 OR `expires` > ?)", generateHash(channel), BAN_TYPE_ADDRESS, addrhash, time.Now().Unix())
 	if p(err) {
 		return b, errors.Wrap(err, "failed to fetch ban")
 	}
@@ -385,9 +390,13 @@ func (d *Database) BanAddr(addrhash string, channel string) (DBBan, error) {
 	return b, nil
 }
 
-func (d *Database) BanAccount(accountid int, channel string) (DBBan, error) {
+func (d *Database) BanAccount(accountid int64, channel string) (DBBan, error) {
 	b := DBBan{}
-	err := d.db.Get(&b, "SELECT * FROM bans WHERE channel=? AND `type`=? AND target=?", generateHash(channel), BAN_TYPE_ACCOUNT, accountid)
+	if accountid == 0 {
+		return b, nil
+	}
+
+	err := d.db.Get(&b, "SELECT * FROM bans WHERE channel=? AND `type`=? AND target=? AND (`expires` = 0 OR `expires` > ?)", generateHash(channel), BAN_TYPE_ACCOUNT, accountid, time.Now().Unix())
 	if p(err) {
 		return b, errors.Wrap(err, "failed to fetch ban")
 	}
@@ -396,19 +405,7 @@ func (d *Database) BanAccount(accountid int, channel string) (DBBan, error) {
 }
 
 func (d *Database) AddBan(b DBBan) error {
-	var err error
-
-	// Channel-specific (not server-wide)
-	if b.Channel != "&" {
-		ex, err := d.Channel(b.Channel)
-		if err != nil {
-			return errors.Wrap(err, "failed to search for existing ban while adding ban")
-		} else if ex.Channel == "" {
-			return ErrChannelDoesNotExist
-		}
-	}
-
-	_, err = d.db.Exec("INSERT INTO bans (`channel`, `type`, `target`, `expires`, `reason`) VALUES (?, ?, ?, ?, ?, ?)", b.Channel, b.Type, b.Target, b.Expires, b.Reason)
+	_, err := d.db.Exec("INSERT INTO bans (`channel`, `type`, `target`, `expires`, `reason`) VALUES (?, ?, ?, ?, ?)", b.Channel, b.Type, b.Target, b.Expires, b.Reason)
 	if p(err) {
 		return errors.Wrap(err, "failed to add ban")
 	}

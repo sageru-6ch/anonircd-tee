@@ -32,8 +32,8 @@ import (
 	"gopkg.in/sorcix/irc.v2"
 )
 
-var prefixAnonymous = irc.Prefix{"Anonymous", "Anon", "IRC"}
 var prefixAnonIRC = irc.Prefix{Name: "AnonIRC"}
+var prefixAnonymous = irc.Prefix{Name: "Anonymous", User: "Anon", Host: "IRC"}
 
 const motd = `
   _|_|                                  _|_|_|  _|_|_|      _|_|_|

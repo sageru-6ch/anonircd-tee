@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/sha3"
@@ -80,4 +81,51 @@ func containsString(s []string, e string) bool {
 // Problem
 func p(err error) bool {
 	return err != nil && err != sql.ErrNoRows
+}
+
+func formatAction(action string, reason string) string {
+	rs := action
+	if reason != "" {
+		rs += ": " + reason
+	}
+
+	return rs
+}
+
+func parseDuration(duration string) int64 {
+	duration = strings.TrimSpace(duration)
+	if intval, err := strconv.Atoi(duration); err == nil {
+		if intval == 0 {
+			return 0 // Never expire
+		}
+	}
+
+	if len(duration) < 2 {
+		return -1 // Value and unit are required
+	}
+
+	sv := duration[0 : len(duration)-1]
+	unit := strings.ToLower(duration[len(duration)-1:])
+
+	value, err := strconv.ParseInt(sv, 10, 64)
+	if err != nil || value < 0 {
+		return -1
+	}
+
+	switch unit {
+	case "y":
+		return value * 3600 * 24 * 365
+	case "w":
+		return value * 3600 * 24 * 7
+	case "d":
+		return value * 3600 * 24
+	case "h":
+		return value * 3600
+	case "m":
+		return value * 60
+	case "s":
+		return value
+	}
+
+	return -1
 }

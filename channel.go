@@ -26,7 +26,7 @@ type ChannelLog struct {
 	Timestamp int64
 	Client    string
 	IP        string
-	Account   int
+	Account   int64
 	Action    string
 	Message   string
 }
@@ -62,7 +62,7 @@ func (c *Channel) Log(client *Client, action string, message string) {
 	c.logs[nano] = &ChannelLog{Timestamp: nano, Client: client.identifier, IP: client.iphash, Account: client.account, Action: action, Message: message}
 }
 
-func (c *Channel) RevealLog(page int, full bool) []string {
+func (c *Channel) RevealLog(page int, showAll bool) []string {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -88,7 +88,7 @@ func (c *Channel) RevealLog(page int, full bool) []string {
 		}
 
 		if page == -1 || i >= (CHANNEL_LOGS_PER_PAGE*(page-1)) {
-			if full || (l.Action != irc.JOIN && l.Action != irc.PART) {
+			if showAll || (l.Action != irc.JOIN && l.Action != irc.PART) {
 				if page > -1 && j == CHANNEL_LOGS_PER_PAGE {
 					logsRemain = true
 					break
@@ -102,7 +102,7 @@ func (c *Channel) RevealLog(page int, full bool) []string {
 	if len(ls) == 0 {
 		ls = append(ls, "No log entries match criteria")
 	} else {
-		filterType := "all"
+		filterType := "all entries"
 		if page > -1 {
 			filterType = fmt.Sprintf("page %d", page)
 		}
@@ -118,7 +118,7 @@ func (c *Channel) RevealLog(page int, full bool) []string {
 	return ls
 }
 
-func (c *Channel) RevealInfo(identifier string) (string, int) {
+func (c *Channel) RevealInfo(identifier string) (string, int64) {
 	if len(identifier) != 5 {
 		return "", 0
 	}

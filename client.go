@@ -21,7 +21,7 @@ type Client struct {
 	nick    string
 	user    string
 	host    string
-	account int
+	account int64
 
 	conn        net.Conn
 	writebuffer chan *irc.Message
@@ -78,16 +78,16 @@ func (c *Client) getPrefix() *irc.Prefix {
 	return &irc.Prefix{Name: c.nick, User: c.user, Host: c.host}
 }
 
-func (c *Client) write(msg *irc.Message) {
+func (c *Client) write(prefix *irc.Prefix, command string, params []string) {
 	if c.state == ENTITY_STATE_TERMINATING {
 		return
 	}
 
-	c.writebuffer <- msg
+	c.writebuffer <- &irc.Message{Prefix: prefix, Command: command, Params: params}
 }
 
 func (c *Client) writeMessage(command string, params []string) {
-	c.write(&irc.Message{&prefixAnonIRC, command, params})
+	c.write(&prefixAnonIRC, command, params)
 }
 
 func (c *Client) sendMessage(message string) {
@@ -149,7 +149,7 @@ func (c *Client) getPermission(channel string) int {
 }
 
 func (c *Client) globalPermission() int {
-	return c.getPermission("&")
+	return c.getPermission(CHANNEL_SERVER)
 }
 
 func (c *Client) canUse(command string, channel string) bool {
