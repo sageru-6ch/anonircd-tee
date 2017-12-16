@@ -40,6 +40,7 @@ const (
 	COMMAND_REVEAL = "REVEAL"
 	COMMAND_KICK   = "KICK"
 	COMMAND_BAN    = "BAN"
+	COMMAND_AUDIT  = "AUDIT"
 
 	// Server admins only
 	COMMAND_KILL    = "KILL"
@@ -68,22 +69,26 @@ var permissionLabels = map[int]string{
 	PERMISSION_SUPERADMIN: "Super Administrator",
 }
 
+var ALL_PERMISSIONS = "Client, Registered Client, VIP, Moderator, Adminsitrator and Super Administrator"
+
 var commandRestrictions = map[int][]string{
 	PERMISSION_REGISTERED: {COMMAND_TOKEN, COMMAND_USERNAME, COMMAND_PASSWORD, COMMAND_FOUND},
 	PERMISSION_MODERATOR:  {COMMAND_REVEAL, COMMAND_KICK, COMMAND_BAN},
-	PERMISSION_ADMIN:      {COMMAND_GRANT},
+	PERMISSION_ADMIN:      {COMMAND_GRANT, COMMAND_AUDIT},
 	PERMISSION_SUPERADMIN: {COMMAND_DROP, COMMAND_KILL, COMMAND_STATS, COMMAND_REHASH, COMMAND_UPGRADE}}
 
 var helpDuration = "Duration can be 0 to never expire, or e.g. 30m, 1h, 2d, 3w"
 var commandUsage = map[string][]string{
-	COMMAND_HELP: {"[command]",
-		"Print info regarding all commands or a specific command"},
+	COMMAND_HELP: {"[command|all]",
+		"Print usage information regarding a specific command or 'all'",
+		"Without a command or 'all', only commands currently available are printed"},
 	COMMAND_INFO: {"[channel]",
 		"When a channel is specified, prints info including whether it is registered",
 		"Without a channel, server info is printed"},
 	COMMAND_REGISTER: {"<username> <password>",
-		"Create an account, allowing you to found channels and moderate existing channels",
-		"See IDENTIFY, FOUND, GRANT"},
+		"Create an account",
+		"Once you've registered, other users may GRANT permissions to you, or ",
+		"See IDENTIFY"},
 	COMMAND_IDENTIFY: {"[username] <password>",
 		"Identify to a previously registered account",
 		"If username is omitted, it will be replaced with your current nick",
@@ -95,23 +100,29 @@ var commandUsage = map[string][]string{
 	COMMAND_PASSWORD: {"<username> <password> <new password> <confirm new password>",
 		"Change your password"},
 	COMMAND_FOUND: {"<channel>",
-		"Register a channel"},
-	COMMAND_GRANT: {"<channel> [account] [updated access]",
-		"When an account token isn't specified, all permissions are listed",
-		"View or update a user's access level by specifying their account token",
-		"To remove an account, set their access level to User"},
-	COMMAND_REVEAL: {"<channel> [page] [full]",
+		"Take ownership of an unfounded channel"},
+	COMMAND_GRANT: {"<channel> [account] [permission]",
+		"When an account token isn't specified, all accounts with permissions are listed",
+		"Specify an account token and permission level to grant that permission",
+		"Specify an account token only to view that account's permission",
+		"To remove an account's permissions, set their permission to Client",
+		"Permissions: " + ALL_PERMISSIONS},
+	COMMAND_REVEAL: {"<channel> [page] [all]",
 		"Print channel log, allowing KICK/BAN to be used",
 		fmt.Sprintf("Results start at page 1, %d per page", CHANNEL_LOGS_PER_PAGE),
-		"All log entries are returned when viewing page -1",
-		"By default joins and parts are hidden, use 'full' to show them"},
+		"Page -1 shows all matching entries",
+		"Joins and parts are hidden by default, add 'all' to show them"},
+	COMMAND_AUDIT: {"<channel> [page]",
+		"Print channel audit log",
+		fmt.Sprintf("Results start at page 1, %d per page", CHANNEL_LOGS_PER_PAGE),
+		"Page -1 shows all matching entries"},
 	COMMAND_KICK: {"<channel> <5 digit log number> [reason]",
 		"Kick a user from a channel"},
 	COMMAND_BAN: {"<channel> <5 digit log number> <duration> [reason]",
 		"Kick and ban a user from a channel",
 		helpDuration},
 	COMMAND_DROP: {"<channel> <confirm channel>",
-		"Delete all channel data, allowing it to be FOUNDed again"},
+		"Delete all channel data, allowing it to be founded again"},
 	COMMAND_KILL: {"<channel> <5 digit log number> <duration> [reason]",
 		"Disconnect and ban a user from the server",
 		helpDuration},
@@ -564,13 +575,13 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 }
 
 func (s *Server) handleMode(c *Client, params []string) {
-	// TODO: irssi sends mode <channel> b, send response
 	if len(params) == 0 || len(params[0]) == 0 {
 		c.sendNotice("Invalid use of MODE")
 		return
 	}
 
-	if c == nil {
+	if len(params) > 1 && params[1] == "b" {
+		c.writeMessage(irc.RPL_ENDOFBANLIST, []string{params[0], "End of Channel Ban List"})
 		return
 	}
 
@@ -586,9 +597,8 @@ func (s *Server) handleMode(c *Client, params []string) {
 
 			// Send channel creation time
 			c.writeMessage(strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{})
-		} else if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
+		} else if len(params) > 1 && len(params[1]) > 0 && params[1][0] == '+' || params[1][0] == '-' {
 			if !c.canUse(irc.MODE, params[0]) {
-				// TODO: Send proper mode denied message
 				c.accessDenied(c.permissionRequired(irc.MODE))
 				return
 			}
@@ -683,25 +693,17 @@ func (s *Server) handleMode(c *Client, params []string) {
 	}
 }
 
-func (s *Server) buildUsage(cl *Client, command string) map[string][]string {
-	u := map[string][]string{}
+func (s *Server) sendUsage(cl *Client, command string) {
 	command = strings.ToUpper(command)
-	for cmd, usage := range commandUsage {
-		if command == COMMAND_HELP || cmd == command {
-			if cl.canUse(cmd, "") {
-				u[cmd] = usage
-			}
-		}
+
+	showAll := false
+	if command == "ALL" {
+		command = COMMAND_HELP
+		showAll = true
 	}
 
-	return u
-}
-
-func (s *Server) sendUsage(cl *Client, command string) {
-	u := s.buildUsage(cl, command)
-
-	commands := make([]string, 0, len(u))
-	for cmd := range u {
+	commands := make([]string, 0, len(commandUsage))
+	for cmd := range commandUsage {
 		commands = append(commands, cmd)
 	}
 	sort.Strings(commands)
@@ -725,9 +727,11 @@ func (s *Server) sendUsage(cl *Client, command string) {
 			for _, permission := range perms {
 				printedLabel = false
 				for _, cmd := range commands {
-					if cl.permissionRequired(cmd) != permission {
+					if (i == 0 && containsString(serverCommands, cmd)) || (i == 1 && !containsString(serverCommands, cmd)) || cl.permissionRequired(cmd) != permission {
 						continue
-					} else if (i == 0 && containsString(serverCommands, cmd)) || (i == 1 && !containsString(serverCommands, cmd)) {
+					}
+
+					if !showAll && !cl.canUse(cmd, "") {
 						continue
 					}
 
@@ -736,7 +740,7 @@ func (s *Server) sendUsage(cl *Client, command string) {
 						printedLabel = true
 					}
 
-					usage = u[cmd]
+					usage = commandUsage[cmd]
 					cl.sendMessage(cmd + " " + usage[0])
 					for _, ul := range usage[1:] {
 						cl.sendMessage("  " + ul)
@@ -745,14 +749,13 @@ func (s *Server) sendUsage(cl *Client, command string) {
 			}
 		}
 	} else {
-		// TODO: Cleanup/merge
-		for _, cmd := range commands {
-			usage = u[cmd]
-
-			cl.sendMessage(cmd + " " + usage[0])
+		if usage, ok := commandUsage[command]; ok {
+			cl.sendMessage(command + " " + usage[0])
 			for _, ul := range usage[1:] {
 				cl.sendMessage("  " + ul)
 			}
+		} else {
+			cl.sendError("Unknown command specified")
 		}
 	}
 
@@ -848,6 +851,7 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		}
 
 		// TODO: Only alphanumeric username
+		// TODO: allow duplicate usernames, only return error on existing username and password
 	case COMMAND_IDENTIFY:
 		if len(params) == 0 || len(params) > 2 {
 			s.sendUsage(cl, command)
@@ -940,7 +944,7 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			log.Panicf("%+v", err)
 		}
 		cl.sendMessage("Password changed successfully")
-	case COMMAND_REVEAL:
+	case COMMAND_REVEAL, COMMAND_AUDIT:
 		// TODO: &#chan shows moderator audit log, & alone shows server admin audit log
 		if len(params) == 0 {
 			s.sendUsage(cl, command)
@@ -975,7 +979,11 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			}
 		}
 
-		s.revealChannelLog(params[0], cl.identifier, page, all)
+		if command == COMMAND_REVEAL {
+			s.revealChannelLog(params[0], cl.identifier, page, all)
+		} else {
+			// TODO: Audit
+		}
 	case COMMAND_KICK:
 		if len(params) < 2 {
 			s.sendUsage(cl, command)
@@ -1119,7 +1127,7 @@ func (s *Server) handleRead(c *Client) {
 			s.killClient(c, "")
 			return
 		}
-		if debugMode && (verbose || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
+		if debugMode && (verbose || len(msg.Command) < 4 || (msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
 			log.Printf("%s -> %s", c.identifier, msg)
 		}
 
@@ -1263,11 +1271,7 @@ func (s *Server) handleRead(c *Client) {
 				}
 			}
 		} else if msg.Command == irc.MODE {
-			if len(msg.Params) == 2 && validChannelPrefix(msg.Params[0]) && msg.Params[1] == "b" {
-				c.writeMessage(irc.RPL_ENDOFBANLIST, []string{msg.Params[0], "End of Channel Ban List"})
-			} else {
-				s.handleMode(c, msg.Params)
-			}
+			s.handleMode(c, msg.Params)
 		} else if msg.Command == irc.TOPIC && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			if len(msg.Params) == 1 {
 				s.sendTopic(msg.Params[0], c.identifier, false)
@@ -1308,7 +1312,7 @@ func (s *Server) handleWrite(c *Client) {
 				msg.Params = append([]string{c.nick}, msg.Params...)
 			}
 
-			if debugMode && (verbose || (len(msg.Command) >= 4 && msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
+			if debugMode && (verbose || len(msg.Command) < 4 || (msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
 				log.Printf("%s <- %s", c.identifier, msg)
 			}
 			c.writer.Encode(msg)
