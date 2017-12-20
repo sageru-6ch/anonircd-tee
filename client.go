@@ -25,7 +25,6 @@ type Client struct {
 
 	conn        net.Conn
 	writebuffer chan *irc.Message
-	terminate   chan bool
 
 	reader *irc.Decoder
 	writer *irc.Encoder
@@ -49,7 +48,6 @@ func NewClient(identifier string, conn net.Conn, ssl bool) *Client {
 	c.nick = "*"
 	c.conn = conn
 	c.writebuffer = make(chan *irc.Message, writebuffersize)
-	c.terminate = make(chan bool)
 	c.reader = irc.NewDecoder(conn)
 	c.writer = irc.NewEncoder(conn)
 
@@ -83,6 +81,7 @@ func (c *Client) write(prefix *irc.Prefix, command string, params []string) {
 		return
 	}
 
+	c.wg.Add(1)
 	c.writebuffer <- &irc.Message{Prefix: prefix, Command: command, Params: params}
 }
 
@@ -104,6 +103,13 @@ func (c *Client) sendError(message string) {
 
 func (c *Client) sendNotice(message string) {
 	c.sendMessage("*** " + message)
+}
+
+func (c *Client) sendBanned(reason string) {
+	if reason != "" {
+		reason = fmt.Sprintf(" (%s)", reason)
+	}
+	c.writeMessage(irc.ERR_YOUREBANNEDCREEP, []string{"You are banned from this server" + reason})
 }
 
 func (c *Client) accessDenied(permissionRequired int) {
