@@ -55,10 +55,6 @@ func randomIdentifier() string {
 	return string(b)
 }
 
-func validChannelPrefix(channel string) bool {
-	return channel[0] == '&' || channel[0] == '#'
-}
-
 func generateHash(s string) string {
 	sha512 := sha3.New512()
 	_, err := sha512.Write([]byte(strings.Join([]string{s, fmt.Sprintf("%x", md5.Sum([]byte(s))), s}, "-")))

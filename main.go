@@ -35,7 +35,7 @@ import (
 var prefixAnonIRC = irc.Prefix{Name: "AnonIRC"}
 var prefixAnonymous = irc.Prefix{Name: "Anonymous", User: "Anon", Host: "IRC"}
 
-const motd = `
+const DEFAULT_MOTD = `
   _|_|                                  _|_|_|  _|_|_|      _|_|_|
 _|    _|  _|_|_|      _|_|    _|_|_|      _|    _|    _|  _|
 _|_|_|_|  _|    _|  _|    _|  _|    _|    _|    _|_|_|    _|

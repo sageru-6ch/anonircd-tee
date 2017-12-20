@@ -33,6 +33,9 @@ const (
 	COMMAND_USERNAME = "USERNAME"
 	COMMAND_PASSWORD = "PASSWORD"
 
+	// User/channel commands
+	COMMAND_MODE = "MODE"
+
 	// Channel/server commands
 	COMMAND_FOUND  = "FOUND"
 	COMMAND_DROP   = "DROP"
@@ -42,7 +45,7 @@ const (
 	COMMAND_BAN    = "BAN"
 	COMMAND_AUDIT  = "AUDIT"
 
-	// Server admins only
+	// Server admin commands
 	COMMAND_KILL    = "KILL"
 	COMMAND_STATS   = "STATS"
 	COMMAND_REHASH  = "REHASH"
@@ -51,6 +54,7 @@ const (
 
 var serverCommands = []string{COMMAND_KILL, COMMAND_STATS, COMMAND_REHASH, COMMAND_UPGRADE}
 
+// TODO: Reorder
 const (
 	PERMISSION_CLIENT     = 0
 	PERMISSION_REGISTERED = 1
@@ -69,11 +73,11 @@ var permissionLabels = map[int]string{
 	PERMISSION_SUPERADMIN: "Super Administrator",
 }
 
-var ALL_PERMISSIONS = "Client, Registered Client, VIP, Moderator, Adminsitrator and Super Administrator"
+var ALL_PERMISSIONS = "Client, Registered Client, VIP, Moderator, Administrator and Super Administrator"
 
 var commandRestrictions = map[int][]string{
 	PERMISSION_REGISTERED: {COMMAND_TOKEN, COMMAND_USERNAME, COMMAND_PASSWORD, COMMAND_FOUND},
-	PERMISSION_MODERATOR:  {COMMAND_REVEAL, COMMAND_KICK, COMMAND_BAN},
+	PERMISSION_MODERATOR:  {COMMAND_MODE, COMMAND_REVEAL, COMMAND_KICK, COMMAND_BAN},
 	PERMISSION_ADMIN:      {COMMAND_GRANT, COMMAND_AUDIT},
 	PERMISSION_SUPERADMIN: {COMMAND_DROP, COMMAND_KILL, COMMAND_STATS, COMMAND_REHASH, COMMAND_UPGRADE}}
 
@@ -81,7 +85,7 @@ var helpDuration = "Duration can be 0 to never expire, or e.g. 30m, 1h, 2d, 3w"
 var commandUsage = map[string][]string{
 	COMMAND_HELP: {"[command|all]",
 		"Print usage information regarding a specific command or 'all'",
-		"Without a command or 'all', only commands currently available are printed"},
+		"Without a command or 'all', only commands you have permission to use are printed"},
 	COMMAND_INFO: {"[channel]",
 		"When a channel is specified, prints info including whether it is registered",
 		"Without a channel, server info is printed"},
@@ -135,6 +139,7 @@ var commandUsage = map[string][]string{
 }
 
 type Config struct {
+	MOTD     string
 	Salt     string
 	DBDriver string
 	DBSource string
@@ -146,6 +151,7 @@ type Server struct {
 	config       *Config
 	configfile   string
 	created      int64
+	motd         []string
 	clients      *sync.Map
 	channels     *sync.Map
 	odyssey      *os.File
@@ -314,6 +320,54 @@ func (s *Server) inChannel(channel string, client string) bool {
 	return false
 }
 
+func (s *Server) canAccessChannel(c *Client, channel string) (bool, string) {
+	dbch, err := db.Channel(channel)
+	if err != nil || dbch.Channel == "" {
+		return false, "invalid channel"
+	}
+	ch := s.getChannel(channel)
+	if ch == nil {
+		return false, "invalid channel"
+	} else if banned, reason := c.isBanned(channel); banned {
+		if reason != "" {
+			reason = fmt.Sprintf(" (%s)", reason)
+		}
+		return false, "you are banned" + reason
+	} else if ch.hasMode("z") && !c.ssl {
+		return false, "only clients connected via SSL are allowed"
+	}
+
+	permission := c.globalPermission()
+	requiredPermission := PERMISSION_CLIENT
+	reason := ""
+
+	if channel[0] == '&' {
+		if permission < PERMISSION_VIP {
+			return false, "restricted channel"
+		}
+	} else if channel[0] != '#' {
+		return false, "invalid channel"
+	}
+
+	if permission < requiredPermission && c.account > 0 {
+		chp, err := db.GetPermission(c.account, channel)
+		if err != nil && chp.Permission > permission {
+			permission = chp.Permission
+		}
+	}
+
+	if ch.hasMode("r") {
+		requiredPermission = PERMISSION_REGISTERED
+		reason = "only registered clients are allowed"
+	}
+	if ch.hasMode("i") {
+		requiredPermission = PERMISSION_VIP
+		reason = "only VIP are allowed"
+	}
+
+	return permission >= requiredPermission, reason
+}
+
 func (s *Server) joinChannel(channel string, client string) {
 	if s.inChannel(channel, client) {
 		return // Already in channel
@@ -324,33 +378,14 @@ func (s *Server) joinChannel(channel string, client string) {
 		return
 	}
 
-	if len(channel) == 0 {
-		return
-	} else if channel[0] == '&' {
-		if cl.globalPermission() < PERMISSION_VIP {
-			cl.accessDenied(0)
-			return
-		}
-	} else if channel[0] != '#' {
-		return
-	}
-
 	ch := s.getChannel(channel)
 	if ch == nil {
 		ch = NewChannel(channel)
 		s.channels.Store(channel, ch)
-	} else if ch.hasMode("z") && !cl.ssl {
-		cl.sendNotice("Unable to join " + channel + ": SSL connections only (channel mode +z)")
-		return
-	}
-
-	banned, reason := cl.isBanned(channel)
-	if banned {
-		ex := ""
-		if reason != "" {
-			ex = ". Reason: " + reason
-		}
-		cl.sendNotice("Unable to join " + channel + ": You are banned" + ex)
+	} else if canaccess, reason := s.canAccessChannel(cl, channel); !canaccess {
+		errmsg := fmt.Sprintf("Cannot join %s: %s", channel, reason)
+		cl.writeMessage(irc.ERR_INVITEONLYCHAN, []string{channel, errmsg})
+		cl.sendNotice(errmsg)
 		return
 	}
 
@@ -391,7 +426,6 @@ func (s *Server) revealChannelLog(channel string, client string, page int, showA
 		return
 	}
 
-	// TODO: Check channel permission
 	ch := s.getChannel(channel)
 	if ch == nil {
 		cl.sendError("Unable to reveal, invalid channel specified")
@@ -574,7 +608,123 @@ func (s *Server) handleTopic(channel string, client string, topic string) {
 	ch.Log(cl, irc.TOPIC, ch.topic)
 }
 
+func (s *Server) handleChannelMode(c *Client, params []string) {
+	ch := s.getChannel(params[0])
+	if ch == nil || !s.inChannel(params[0], c.identifier) {
+		return
+	}
+
+	if len(params) == 1 || params[1] == "" {
+		c.writeMessage(strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], ch.printModes(ch.getModes(), nil)}, " "), []string{})
+
+		// Send channel creation time
+		c.writeMessage(strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{})
+	} else if len(params) > 1 && (params[1] == "" || params[1][0] == '+' || params[1][0] == '-') {
+		if !c.canUse(COMMAND_MODE, params[0]) {
+			c.accessDenied(c.permissionRequired(COMMAND_MODE))
+			return
+		}
+
+		lastmodes := make(map[string]string)
+		for m, mv := range ch.getModes() {
+			lastmodes[m] = mv
+		}
+
+		if params[1][0] == '+' {
+			ch.addModes(params[1][1:])
+		} else {
+			ch.removeModes(params[1][1:])
+		}
+		s.enforceModes(params[0])
+
+		if reflect.DeepEqual(ch.getModes(), lastmodes) {
+			return
+		}
+
+		// TODO: Check if local modes were set/unset, only send changes to local client
+		addedmodes, removedmodes := ch.diffModes(lastmodes)
+
+		resendusercount := false
+		if _, ok := addedmodes["c"]; ok {
+			resendusercount = true
+		}
+		if _, ok := removedmodes["c"]; ok {
+			resendusercount = true
+		}
+		if _, ok := removedmodes["D"]; ok {
+			resendusercount = true
+		}
+
+		if len(addedmodes) == 0 && len(removedmodes) == 0 {
+			addedmodes = c.getModes()
+		}
+
+		ch.clients.Range(func(k, v interface{}) bool {
+			cl := s.getClient(k.(string))
+			if cl != nil {
+				cl.write(&prefixAnonymous, irc.MODE, []string{params[0], ch.printModes(addedmodes, removedmodes)})
+			}
+
+			return true
+		})
+
+		if resendusercount {
+			s.updateClientCount(params[0], c.identifier, "Enforcing MODEs")
+		}
+	}
+}
+
+func (s *Server) handleUserMode(c *Client, params []string) {
+	if len(params) == 1 || params[1] == "" {
+		c.writeMessage(strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(c.getModes(), nil)}, " "), []string{})
+		return
+	}
+
+	lastmodes := c.getModes()
+
+	if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
+		if params[1][0] == '+' {
+			c.addModes(params[1][1:])
+		} else {
+			c.removeModes(params[1][1:])
+		}
+	}
+
+	if reflect.DeepEqual(c.modes, lastmodes) {
+		return
+	}
+
+	addedmodes, removedmodes := c.diffModes(lastmodes)
+
+	resendusercount := false
+	if _, ok := addedmodes["c"]; ok {
+		resendusercount = true
+	}
+	if _, ok := removedmodes["c"]; ok {
+		resendusercount = true
+	}
+	if _, ok := removedmodes["D"]; ok {
+		resendusercount = true
+	}
+
+	if len(addedmodes) == 0 && len(removedmodes) == 0 {
+		addedmodes = c.getModes()
+	}
+
+	c.writeMessage(strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(addedmodes, removedmodes)})
+
+	if resendusercount {
+		for ch := range s.getChannels(c.identifier) {
+			s.updateClientCount(ch, c.identifier, "Enforcing MODEs")
+		}
+	}
+}
+
 func (s *Server) handleMode(c *Client, params []string) {
+	if c == nil {
+		return
+	}
+
 	if len(params) == 0 || len(params[0]) == 0 {
 		c.sendNotice("Invalid use of MODE")
 		return
@@ -585,111 +735,10 @@ func (s *Server) handleMode(c *Client, params []string) {
 		return
 	}
 
-	if validChannelPrefix(params[0]) {
-		ch := s.getChannel(params[0])
-
-		if ch == nil {
-			return
-		}
-
-		if len(params) == 1 || params[1] == "" {
-			c.writeMessage(strings.Join([]string{irc.RPL_CHANNELMODEIS, c.nick, params[0], ch.printModes(ch.getModes(), nil)}, " "), []string{})
-
-			// Send channel creation time
-			c.writeMessage(strings.Join([]string{"329", c.nick, params[0], fmt.Sprintf("%d", int32(ch.created))}, " "), []string{})
-		} else if len(params) > 1 && len(params[1]) > 0 && params[1][0] == '+' || params[1][0] == '-' {
-			if !c.canUse(irc.MODE, params[0]) {
-				c.accessDenied(c.permissionRequired(irc.MODE))
-				return
-			}
-
-			lastmodes := make(map[string]string)
-			for m, mv := range ch.getModes() {
-				lastmodes[m] = mv
-			}
-
-			if params[1][0] == '+' {
-				ch.addModes(params[1][1:])
-			} else {
-				ch.removeModes(params[1][1:])
-			}
-			s.enforceModes(params[0])
-
-			if !reflect.DeepEqual(ch.getModes(), lastmodes) {
-				// TODO: Check if local modes were set/unset, only send changes to local client
-				addedmodes, removedmodes := ch.diffModes(lastmodes)
-
-				resendusercount := false
-				if _, ok := addedmodes["c"]; ok {
-					resendusercount = true
-				}
-				if _, ok := removedmodes["c"]; ok {
-					resendusercount = true
-				}
-				if _, ok := removedmodes["D"]; ok {
-					resendusercount = true
-				}
-
-				if len(addedmodes) == 0 && len(removedmodes) == 0 {
-					addedmodes = c.getModes()
-				}
-
-				ch.clients.Range(func(k, v interface{}) bool {
-					cl := s.getClient(k.(string))
-					if cl != nil {
-						cl.write(&prefixAnonymous, irc.MODE, []string{params[0], ch.printModes(addedmodes, removedmodes)})
-					}
-
-					return true
-				})
-
-				if resendusercount {
-					s.updateClientCount(params[0], c.identifier, "Enforcing MODEs")
-				}
-			}
-		}
+	if params[0][0] == '#' || params[0][0] == '&' {
+		s.handleChannelMode(c, params)
 	} else {
-		if len(params) == 1 || params[1] == "" {
-			c.writeMessage(strings.Join([]string{irc.RPL_UMODEIS, c.nick, c.printModes(c.getModes(), nil)}, " "), []string{})
-			return
-		}
-
-		lastmodes := c.getModes()
-
-		if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
-			if params[1][0] == '+' {
-				c.addModes(params[1][1:])
-			} else {
-				c.removeModes(params[1][1:])
-			}
-		}
-
-		if !reflect.DeepEqual(c.modes, lastmodes) {
-			addedmodes, removedmodes := c.diffModes(lastmodes)
-
-			resendusercount := false
-			if _, ok := addedmodes["c"]; ok {
-				resendusercount = true
-			}
-			if _, ok := removedmodes["c"]; ok {
-				resendusercount = true
-			}
-			if _, ok := removedmodes["D"]; ok {
-				resendusercount = true
-			}
-
-			if len(addedmodes) == 0 && len(removedmodes) == 0 {
-				addedmodes = c.getModes()
-			}
-
-			c.writeMessage(strings.Join([]string{irc.MODE, c.nick}, " "), []string{c.printModes(addedmodes, removedmodes)})
-
-			if resendusercount {
-				for ch := range s.getChannels(c.identifier) {
-					s.updateClientCount(ch, c.identifier, "Enforcing MODEs")
-				}
-			}
-		}
+		s.handleUserMode(c, params)
 	}
 }
 
@@ -776,7 +825,7 @@ func (s *Server) ban(channel string, iphash string, accountid int64, expires int
 			return err
 		}
 	}
-
+	log.Println("B")
 	if accountid > 0 {
 		b = DBBan{Channel: generateHash(channel), Type: BAN_TYPE_ACCOUNT, Target: fmt.Sprintf("%d", accountid), Expires: expires}
 		err := db.AddBan(b)
@@ -784,9 +833,8 @@ func (s *Server) ban(channel string, iphash string, accountid int64, expires int
 			return err
 		}
 	}
-
+	log.Println("C")
 	if b.Channel == "" {
-		log.Println("blank chan")
 		return nil
 	}
 
@@ -796,7 +844,7 @@ func (s *Server) ban(channel string, iphash string, accountid int64, expires int
 		ch = ""
 		rs = formatAction("Killed", reason)
 	}
-
+	log.Println("D")
 	cls := s.getClients(ch)
 	for _, cl := range cls {
 		if cl == nil {
@@ -841,8 +889,27 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		s.sendUsage(cl, cmd)
 		return
 	case COMMAND_INFO:
-		// TODO: when channel is supplied, send whether it is registered and show a notice that it is dropping soon if no super admins have logged in in X days
-		cl.sendMessage("Server info: AnonIRCd https://github.com/sageru-6ch/anonircd")
+		if len(params) > 0 && len(params[0]) > 0 {
+			if canaccess, reason := s.canAccessChannel(cl, params[0]); !canaccess {
+				cl.sendError("Failed to fetch channel INFO, " + reason)
+				return
+			}
+
+			dbch, err := db.Channel(params[0])
+			if err != nil {
+				cl.sendError("Failed to fetch channel INFO, " + err.Error())
+				return
+			}
+
+			chst := "Unfounded"
+			if dbch.Channel != "" {
+				chst = "Founded"
+			}
+
+			cl.sendMessage(fmt.Sprintf("%s: %s", params[0], chst))
+		} else {
+			cl.sendMessage("AnonIRCd https://github.com/sageru-6ch/anonircd")
+		}
 		return
 	case COMMAND_REGISTER:
 		if len(params) == 0 {
@@ -945,7 +1012,6 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		}
 		cl.sendMessage("Password changed successfully")
 	case COMMAND_REVEAL, COMMAND_AUDIT:
-		// TODO: &#chan shows moderator audit log, & alone shows server admin audit log
 		if len(params) == 0 {
 			s.sendUsage(cl, command)
 			return
@@ -1044,6 +1110,7 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 			bch = CHANNEL_SERVER
 		}
 		err := s.ban(bch, rcl.iphash, rcl.account, expires, reason)
+		log.Println("A")
 		if err != nil {
 			cl.sendError(fmt.Sprintf("Unable to %s, %v", strings.ToLower(command), err))
 			return
@@ -1051,7 +1118,6 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 
 		cl.sendMessage(fmt.Sprintf("%sed %s %s", strings.ToLower(command), params[0], params[1]))
 	case COMMAND_STATS:
-
 		cl.sendMessage(fmt.Sprintf("%d clients in %d channels", s.clientCount(), s.channelCount()))
 	case COMMAND_REHASH:
 
@@ -1066,41 +1132,46 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 	}
 }
 
-func (s *Server) handlePrivmsg(channel string, client string, message string) {
+func (s *Server) handlePrivmsg(target string, client string, message string) {
 	cl := s.getClient(client)
-	if cl == nil {
+	if cl == nil || len(target) == 0 {
 		return
 	}
 
-	if strings.ToLower(channel) == "anonirc" {
+	if strings.ToLower(target) == "anonirc" {
 		params := strings.Split(message, " ")
-		if len(params) > 0 && len(params[0]) > 0 {
-			var otherparams []string
-			if len(params) > 1 {
-				otherparams = params[1:]
-			}
-
-			s.handleUserCommand(client, params[0], otherparams)
+		if len(params) == 0 || len(params[0]) == 0 {
+			return
 		}
 
+		var otherparams []string
+		if len(params) > 1 {
+			otherparams = params[1:]
+		}
+
+		s.handleUserCommand(client, params[0], otherparams)
 		return
-	} else if channel == "" || !validChannelPrefix(channel) {
+	} else if target[0] != '#' && target[0] != '&' {
+		cl.writeMessage(irc.ERR_NOSUCHNICK, []string{target, "No such nick/channel"})
 		return
-	} else if !s.inChannel(channel, client) {
-		return // Not in channel
+	} else if !s.inChannel(target, client) {
+		cl.writeMessage(irc.ERR_CANNOTSENDTOCHAN, []string{target, fmt.Sprintf("No external channel messages (%s)", target)})
+		return
 	}
 
-	ch := s.getChannel(channel)
+	ch := s.getChannel(target)
 	if ch == nil {
 		return
+	} else if ch.hasMode("m") && cl.getPermission(target) < PERMISSION_VIP {
+		cl.writeMessage(irc.ERR_CANNOTSENDTOCHAN, []string{target, fmt.Sprintf("Channel is moderated, only VIP may speak (%s)", target)})
+		return
 	}
 
-	s.updateClientCount(channel, "", "")
-
+	s.updateClientCount(target, "", "")
 	ch.clients.Range(func(k, v interface{}) bool {
 		chcl := s.getClient(k.(string))
 		if chcl != nil && chcl.identifier != client {
-			chcl.write(&prefixAnonymous, irc.PRIVMSG, []string{channel, message})
+			chcl.write(&prefixAnonymous, irc.PRIVMSG, []string{target, message})
 		}
 
 		return true
@@ -1114,19 +1185,19 @@ func (s *Server) handleRead(c *Client) {
 			return
 		}
 
-		c.conn.SetReadDeadline(time.Now().Add(300 * time.Second))
-
 		if _, ok := s.clients.Load(c.identifier); !ok {
 			s.killClient(c, "")
 			return
 		}
 
+		c.conn.SetReadDeadline(time.Now().Add(300 * time.Second))
 		msg, err := c.reader.Decode()
 		if msg == nil || err != nil {
 			// Error decoding message, client probably disconnected
 			s.killClient(c, "")
 			return
 		}
+
 		if debugMode && (verbose || len(msg.Command) < 4 || (msg.Command[0:4] != irc.PING && msg.Command[0:4] != irc.PONG)) {
 			log.Printf("%s -> %s", c.identifier, msg)
 		}
@@ -1142,12 +1213,11 @@ func (s *Server) handleRead(c *Client) {
 			c.writeMessage(irc.RPL_CREATED, []string{fmt.Sprintf("This server was created %s", time.Unix(s.created, 0).UTC())})
 			c.writeMessage(strings.Join([]string{irc.RPL_MYINFO, c.nick, "AnonIRC", "AnonIRCd", CLIENT_MODES, CHANNEL_MODES, CHANNEL_MODES_ARG}, " "), []string{})
 
-			motdsplit := strings.Split(motd, "\n")
-			for i, motdmsg := range motdsplit {
+			for i, motdmsg := range s.motd {
 				var motdcode string
 				if i == 0 {
 					motdcode = irc.RPL_MOTDSTART
-				} else if i < len(motdsplit)-1 {
+				} else if i < len(s.motd)-1 {
 					motdcode = irc.RPL_MOTD
 				} else {
 					motdcode = irc.RPL_ENDOFMOTD
@@ -1335,23 +1405,27 @@ func (s *Server) handleConnection(conn net.Conn, ssl bool) {
 		}
 	}
 
-	client := NewClient(identifier, conn, ssl)
+	c := NewClient(identifier, conn, ssl)
 	banned := true
 	reason := ""
-	if client != nil {
-		banned, reason = client.isBanned("")
+	if c != nil {
+		banned, reason = c.isBanned(CHANNEL_SERVER)
 	}
-	if banned {
-		// TODO: Send banned message
-		_ = reason
-		return // Banned
+
+	go s.handleWrite(c)
+	if !banned {
+		s.clients.Store(c.identifier, c)
+		s.handleRead(c) // Block until the connection is closed
+	} else {
+		if reason != "" {
+			reason = fmt.Sprintf(" (%s)", reason)
+		}
+		c.writeMessage(irc.ERR_YOUREBANNEDCREEP, []string{"You are banned from this server" + reason})
+		time.Sleep(1 * time.Second)
 	}
-	s.clients.Store(client.identifier, client)
 
-	go s.handleWrite(client)
-	s.handleRead(client) // Block until the connection is closed
-
-	s.killClient(client, "")
+	s.killClient(c, "")
+	s.clients.Delete(identifier)
 }
 
 func (s *Server) killClient(c *Client, reason string) {
@@ -1492,6 +1566,12 @@ func (s *Server) loadConfig() error {
 
 		return errors.New(fmt.Sprintf("DBDriver and DBSource must be configured in %s\nExample:\n\nDBDriver=\"sqlite3\"\nDBSource=\"/home/user/anonircd/anonircd.db\"", s.configfile))
 	}
+
+	motd := DEFAULT_MOTD
+	if s.config.MOTD != "" {
+		motd = s.config.MOTD
+	}
+	s.motd = strings.Split(strings.TrimRight(motd, " \t\r\n"), "\n")
 
 	return nil
 }
