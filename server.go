@@ -320,7 +320,7 @@ func (s *Server) inChannel(channel string, client string) bool {
 	return false
 }
 
-func (s *Server) canAccessChannel(c *Client, channel string) (bool, string) {
+func (s *Server) canJoin(c *Client, channel string, key string) (bool, string) {
 	dbch, err := db.Channel(channel)
 	if err != nil || dbch.Channel == "" {
 		return false, "invalid channel"
@@ -356,6 +356,23 @@ func (s *Server) canAccessChannel(c *Client, channel string) (bool, string) {
 		}
 	}
 
+	if permission < PERMISSION_VIP {
+		if ch.hasMode("k") && ch.getMode("k") != key {
+			return false, "invalid channel key specified"
+		} else if ch.hasMode("l") {
+			var l int
+			var err error
+			l, err = strconv.Atoi(ch.getMode("l"))
+			if err != nil {
+				l = 0
+			}
+
+			if l > 0 && ch.clientCount() >= l {
+				return false, "limited channel, join again in a few moments"
+			}
+		}
+	}
+
 	if ch.hasMode("r") {
 		requiredPermission = PERMISSION_REGISTERED
 		reason = "only registered clients are allowed"
@@ -368,7 +385,7 @@ func (s *Server) canAccessChannel(c *Client, channel string) (bool, string) {
 	return permission >= requiredPermission, reason
 }
 
-func (s *Server) joinChannel(channel string, client string) {
+func (s *Server) joinChannel(client string, channel string, key string) {
 	if s.inChannel(channel, client) {
 		return // Already in channel
 	}
@@ -382,14 +399,14 @@ func (s *Server) joinChannel(channel string, client string) {
 	if ch == nil {
 		ch = NewChannel(channel)
 		s.channels.Store(channel, ch)
-	} else if canaccess, reason := s.canAccessChannel(cl, channel); !canaccess {
+	} else if canaccess, reason := s.canJoin(cl, channel, key); !canaccess {
 		errmsg := fmt.Sprintf("Cannot join %s: %s", channel, reason)
 		cl.writeMessage(irc.ERR_INVITEONLYCHAN, []string{channel, errmsg})
 		cl.sendNotice(errmsg)
 		return
 	}
 
-	ch.clients.Store(client, s.clientsInChannel(channel, client)+1)
+	ch.clients.Store(client, s.anonCount(channel, client)+1)
 	cl.write(cl.getPrefix(), irc.JOIN, []string{channel})
 	ch.Log(cl, irc.JOIN, "")
 
@@ -453,7 +470,7 @@ func (s *Server) enforceModes(channel string) {
 	}
 }
 
-func (s *Server) clientsInChannel(channel string, client string) int {
+func (s *Server) anonCount(channel string, client string) int {
 	ch := s.getChannel(channel)
 	cl := s.getClient(client)
 
@@ -461,12 +478,7 @@ func (s *Server) clientsInChannel(channel string, client string) int {
 		return 0
 	}
 
-	ccount := 0
-	ch.clients.Range(func(k, v interface{}) bool {
-		ccount++
-		return true
-	})
-
+	ccount := ch.clientCount()
 	if (ch.hasMode("c") || cl.hasMode("c")) && ccount >= 2 {
 		return 2
 	}
@@ -493,7 +505,7 @@ func (s *Server) updateClientCount(channel string, client string, reason string)
 		}
 
 		reasonShown = false
-		chancount := s.clientsInChannel(channel, cl.identifier)
+		chancount := s.anonCount(channel, cl.identifier)
 
 		if ccount < chancount {
 			for i := ccount; i < chancount; i++ {
@@ -539,7 +551,7 @@ func (s *Server) sendNames(channel string, clientname string) {
 		names = append(names, cl.nick)
 	}
 
-	ccount := s.clientsInChannel(channel, clientname)
+	ccount := s.anonCount(channel, clientname)
 	for i := 1; i < ccount; i++ {
 		if cl.capHostInNames {
 			names = append(names, s.getAnonymousPrefix(i).String())
@@ -631,7 +643,7 @@ func (s *Server) handleChannelMode(c *Client, params []string) {
 		}
 
 		if params[1][0] == '+' {
-			ch.addModes(params[1][1:])
+			ch.addModes(params[1:])
 		} else {
 			ch.removeModes(params[1][1:])
 		}
@@ -684,7 +696,7 @@ func (s *Server) handleUserMode(c *Client, params []string) {
 
 	if len(params) > 1 && len(params[1]) > 0 && (params[1][0] == '+' || params[1][0] == '-') {
 		if params[1][0] == '+' {
-			c.addModes(params[1][1:])
+			c.addModes(params[1:])
 		} else {
 			c.removeModes(params[1][1:])
 		}
@@ -890,9 +902,11 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		return
 	case COMMAND_INFO:
 		if len(params) > 0 && len(params[0]) > 0 {
-			if canaccess, reason := s.canAccessChannel(cl, params[0]); !canaccess {
-				cl.sendError("Failed to fetch channel INFO, " + reason)
-				return
+			if !s.inChannel(params[0], client) {
+				if canaccess, reason := s.canJoin(cl, params[0], ""); !canaccess {
+					cl.sendError("Failed to fetch channel INFO, " + reason)
+					return
+				}
 			}
 
 			dbch, err := db.Channel(params[0])
@@ -935,9 +949,8 @@ func (s *Server) handleUserCommand(client string, command string, params []strin
 		authSuccess := cl.identify(username, password)
 		if authSuccess {
 			cl.sendNotice("Identified successfully")
-
 			if cl.globalPermission() >= PERMISSION_VIP {
-				s.joinChannel(CHANNEL_SERVER, cl.identifier)
+				s.joinChannel(cl.identifier, CHANNEL_SERVER, "")
 			}
 
 			for clch := range s.getChannels(cl.identifier) {
@@ -1225,9 +1238,9 @@ func (s *Server) handleRead(c *Client) {
 				c.writeMessage(motdcode, []string{"  " + motdmsg})
 			}
 
-			s.joinChannel(CHANNEL_LOBBY, c.identifier)
+			s.joinChannel(c.identifier, CHANNEL_LOBBY, "")
 			if c.globalPermission() >= PERMISSION_VIP {
-				s.joinChannel(CHANNEL_SERVER, c.identifier)
+				s.joinChannel(c.identifier, CHANNEL_SERVER, "")
 			}
 		} else if msg.Command == irc.PASS && c.user == "" && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			// TODO: Add auth and multiple failed attempts ban
@@ -1303,7 +1316,7 @@ func (s *Server) handleRead(c *Client) {
 					return true
 				}
 
-				chans[key] = s.clientsInChannel(key, c.identifier)
+				chans[key] = s.anonCount(key, c.identifier)
 				return true
 			})
 
@@ -1315,8 +1328,12 @@ func (s *Server) handleRead(c *Client) {
 			}
 			c.writeMessage(irc.RPL_LISTEND, []string{"End of /LIST"})
 		} else if msg.Command == irc.JOIN && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
+			key := ""
+			if len(msg.Params) > 1 {
+				key = msg.Params[1]
+			}
 			for _, channel := range strings.Split(msg.Params[0], ",") {
-				s.joinChannel(channel, c.identifier)
+				s.joinChannel(c.identifier, channel, key)
 			}
 		} else if msg.Command == irc.NAMES && len(msg.Params) > 0 && len(msg.Params[0]) > 0 {
 			for _, channel := range strings.Split(msg.Params[0], ",") {
@@ -1326,7 +1343,7 @@ func (s *Server) handleRead(c *Client) {
 			var ccount int
 			for _, channel := range strings.Split(msg.Params[0], ",") {
 				if s.inChannel(channel, c.identifier) {
-					ccount = s.clientsInChannel(channel, c.identifier)
+					ccount = s.anonCount(channel, c.identifier)
 					for i := 0; i < ccount; i++ {
 						var prfx *irc.Prefix
 						if i == 0 {

@@ -149,3 +149,13 @@ func (c *Channel) HasClient(client string) bool {
 	_, ok := c.clients.Load(client)
 	return ok
 }
+
+func (c *Channel) clientCount() int {
+	ccount := 0
+	c.clients.Range(func(k, v interface{}) bool {
+		ccount++
+		return true
+	})
+
+	return ccount
+}

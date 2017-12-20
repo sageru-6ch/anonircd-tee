@@ -13,7 +13,7 @@ const ENTITY_STATE_TERMINATING = 0
 const ENTITY_STATE_NORMAL = 1
 
 const CLIENT_MODES = "cD"
-const CHANNEL_MODES = "cDimprstz"
+const CHANNEL_MODES = "cDiklmprstz"
 const CHANNEL_MODES_ARG = "kl"
 
 type Entity struct {
@@ -30,6 +30,14 @@ func (e *Entity) Initialize(etype int, identifier string) {
 	e.created = time.Now().Unix()
 	e.state = ENTITY_STATE_NORMAL
 	e.modes = new(sync.Map)
+}
+
+func (e *Entity) getMode(mode string) string {
+	if v, ok := e.modes.Load(mode); ok {
+		return v.(string)
+	}
+
+	return ""
 }
 
 func (e *Entity) getModes() map[string]string {
@@ -62,9 +70,21 @@ func (e *Entity) addMode(mode string, value string) {
 	}
 }
 
-func (e *Entity) addModes(modes string) {
-	for _, mode := range strings.Split(modes, "") {
-		e.addMode(mode, "")
+func (e *Entity) addModes(newmodes []string) {
+	if len(newmodes) == 0 {
+		return
+	}
+
+	p := 1
+	for _, mode := range strings.Split(newmodes[0], "") {
+		if strings.ContainsAny(mode, CHANNEL_MODES_ARG) {
+			if len(newmodes) > p {
+				e.addMode(mode, newmodes[p])
+				p++
+			}
+		} else {
+			e.addMode(mode, "")
+		}
 	}
 }
 
