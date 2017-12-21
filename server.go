@@ -1473,7 +1473,7 @@ func (s *Server) listenPlain() {
 					log.Println("Error accepting connection:", err)
 					continue
 				}
-				go s.handleConnection(conn, true)
+				go s.handleConnection(conn, false)
 			}
 		}
 		listen.Close()
