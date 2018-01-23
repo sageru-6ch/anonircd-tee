@@ -42,11 +42,19 @@ var tables = map[string][]string{
 		"`type` INTEGER NULL",
 		"`target` TEXT NULL",
 		"`expires` INTEGER NULL",
-		"`reason` TEXT NULL"}}
+		"`reason` TEXT NULL"},
+	"attributes": {
+		"`type` INTEGER NULL",
+		"`target` TEXT NULL",
+		"`timestamp` INTEGER NULL",
+		"`attribute` TEXT NULL",
+		"`value` INTEGER NULL"}}
 
 const (
-	BAN_TYPE_ADDRESS = 1
-	BAN_TYPE_ACCOUNT = 2
+	BAN_TYPE_ADDRESS       = 1
+	BAN_TYPE_ACCOUNT       = 2
+	ATTRIBUTE_TYPE_CHANNEL = 1
+	ATTRIBUTE_TYPE_ACCOUNT = 2
 )
 
 type DBAccount struct {
@@ -60,6 +68,14 @@ type DBChannel struct {
 	Topic     string
 	TopicTime int64
 	Password  string
+}
+
+type DBAttribute struct {
+	Type      int
+	Target    string
+	Timestamp int64
+	Attribute string
+	Value     string
 }
 
 type DBPermission struct {
@@ -307,6 +323,41 @@ func (d *Database) AddChannel(accountid int64, channel *DBChannel) error {
 	err = d.SetPermission(accountid, chch, PERMISSION_SUPERADMIN)
 	if err != nil {
 		return errors.Wrap(err, "failed to set permission on newly added channel")
+	}
+
+	return nil
+}
+
+// Attributes
+
+func (d *Database) Attribute(attrtype int, target string, attribute string) (DBAttribute, error) {
+	dba := DBAttribute{}
+	attribute = strings.ToLower(attribute)
+
+	err := d.db.Get(&dba, "SELECT * FROM attributes WHERE type=? AND channel=? and attribute=? LIMIT 1", attrtype, target, attribute)
+	if p(err) {
+		return dba, errors.Wrap(err, "failed to fetch attribute")
+	}
+
+	return dba, nil
+}
+
+func (d *Database) SetAttribute(attrtype int, target string, attribute string, value string) error {
+	dba, err := d.Attribute(attrtype, target, attribute)
+	if err != nil {
+		log.Panicf("%+v", err)
+	}
+
+	if dba.Target != "" {
+		_, err = d.db.Exec("UPDATE attributes SET value=?, timestamp=? WHERE type=? AND target=? AND attribute=?", value, time.Now().Unix(), attrtype, target, attribute)
+		if err != nil {
+			return errors.Wrap(err, "failed to set attribute")
+		}
+	} else {
+		_, err = d.db.Exec("INSERT INTO attributes (type, target, timestamp, attribute, value) VALUES (?, ?, ?, ?, ?)", attrtype, target, time.Now().Unix(), attribute, value)
+		if err != nil {
+			return errors.Wrap(err, "failed to set attribute")
+		}
 	}
 
 	return nil
