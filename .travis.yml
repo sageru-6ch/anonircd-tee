@@ -3,6 +3,9 @@ language: go
 go:
   - 1.x
 
+notifications:
+  email: false
+
 env:
   global:
     - CGO_ENABLED=0
