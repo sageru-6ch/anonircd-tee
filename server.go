@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -148,14 +147,12 @@ type Config struct {
 }
 
 type Server struct {
-	config       *Config
-	configfile   string
-	created      int64
-	motd         []string
-	clients      *sync.Map
-	channels     *sync.Map
-	odyssey      *os.File
-	odysseymutex *sync.RWMutex
+	config     *Config
+	configfile string
+	created    int64
+	motd       []string
+	clients    *sync.Map
+	channels   *sync.Map
 
 	restartplain chan bool
 	restartssl   chan bool
@@ -172,7 +169,6 @@ func NewServer(configfile string) *Server {
 	s.created = time.Now().Unix()
 	s.clients = new(sync.Map)
 	s.channels = new(sync.Map)
-	s.odysseymutex = new(sync.RWMutex)
 
 	s.restartplain = make(chan bool, 1)
 	s.restartssl = make(chan bool, 1)
@@ -1283,12 +1279,12 @@ func (s *Server) handleRead(c *Client) {
 					whoisnick += strconv.Itoa(whoisindex)
 				}
 
-				easteregg := s.readOdyssey(whoisindex)
+				easteregg := readOdyssey(whoisindex)
 				if easteregg == "" {
 					easteregg = "I am the owner of my actions, heir of my actions, actions are the womb (from which I have sprung), actions are my relations, actions are my protection. Whatever actions I do, good or bad, of these I shall become the heir."
 				}
 
-				c.writeMessage(irc.RPL_AWAY, []string{whoisnick, easteregg})
+				c.writeMessage(irc.RPL_WHOISUSER, []string{whoisnick, "Anon", "IRC", "*", easteregg})
 				c.writeMessage(irc.RPL_ENDOFWHOIS, []string{whoisnick, "End of /WHOIS list."})
 			}()
 		} else if msg.Command == irc.ISON {
@@ -1598,30 +1594,6 @@ func (s *Server) reload() error {
 	s.restartssl <- true
 
 	return nil
-}
-
-func (s *Server) readOdyssey(line int) string {
-	s.odysseymutex.Lock()
-	defer s.odysseymutex.Unlock()
-
-	scanner := bufio.NewScanner(s.odyssey)
-	currentline := 1
-	for scanner.Scan() {
-		if currentline == line {
-			s.odyssey.Seek(0, 0)
-			return scanner.Text()
-		}
-
-		currentline++
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Printf("Failed to read ODYSSEY: %v", err)
-		return ""
-	}
-
-	s.odyssey.Seek(0, 0)
-	return ""
 }
 
 func (s *Server) listen() {

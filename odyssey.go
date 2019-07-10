@@ -1,4 +1,25 @@
-Tell me, O Muse, of that ingenious hero who travelled far and wide after
+package main
+
+func readOdyssey(line int) string {
+	var out string
+
+	currentline := 1
+	for _, char := range odyssey {
+		if currentline == line {
+			if char == '\n' {
+				break
+			}
+
+			out += string(char)
+		} else if char == '\n' {
+			currentline++
+		}
+	}
+
+	return out
+}
+
+var odyssey = `Tell me, O Muse, of that ingenious hero who travelled far and wide after
 he had sacked the famous town of Troy. Many cities did he visit, and
 many were the nations with whose manners and customs he was acquainted;
 moreover he suffered much by sea while trying to save his own life and
@@ -10259,4 +10280,4 @@ Most people start at our Web site which has the main PG search facility:
 This Web site includes information about Project Gutenberg-tm,
 including how to make donations to the Project Gutenberg Literary
 Archive Foundation, how to help produce our new eBooks, and how to
-subscribe to our email newsletter to hear about new eBooks.
+subscribe to our email newsletter to hear about new eBooks.`

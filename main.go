@@ -100,11 +100,5 @@ func main() {
 		}
 	}()
 
-	s.odyssey, err = os.Open("ODYSSEY")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer s.odyssey.Close()
-
 	s.listen()
 }
