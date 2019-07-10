@@ -89,13 +89,14 @@ func main() {
 	defer s.closeDatabase()
 
 	sighup := make(chan os.Signal, 1)
-	signal.Notify(sighup,
-		syscall.SIGHUP)
+	signal.Notify(sighup, syscall.SIGHUP)
 	go func() {
-		<-sighup
-		err := s.reload()
-		if err != nil {
-			log.Println(err)
+		for {
+			<-sighup
+			err := s.reload()
+			if err != nil {
+				log.Println(err)
+			}
 		}
 	}()
 
